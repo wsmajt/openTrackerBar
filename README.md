@@ -1,6 +1,6 @@
 # OpenTrackerBar
 
-[DankMaterialShell](https://github.com/DankMaterialShell/DankMaterialShell) plugin that tracks OpenCode.ai usage limits via the [opentracker](https://github.com/wsmajt/opentracker) CLI.
+[DankMaterialShell](https://github.com/DankMaterialShell/DankMaterialShell) plugin that tracks Opencode and OpenAI Codex usage limits via the [opentracker](https://github.com/wsmajt/opentracker) CLI.
 
 ## Requirements
 
@@ -15,12 +15,15 @@ git clone https://github.com/wsmajt/OpenTrackerBar.git ~/.config/DankMaterialShe
 ## Setup
 
 ```bash
-opentracker login opencode
+opentracker login opencode-go
 # Log in via browser, export Netscape cookies to ~/.config/opentracker/opencode-cookies.txt
 opentracker fetch opencode-go
 # First run will prompt for your workspace ID
+
+opentracker fetch codex
+# Shows OpenAI/Codex primary and secondary usage windows
 ```
 
 ## Usage
 
-Enable the `OpenTrackerBar` plugin in DankMaterialShell settings.
+Enable the `OpenTrackerBar` plugin in DankMaterialShell settings. Click the widget and switch between the Opencode and OpenAI tabs.

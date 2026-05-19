@@ -11,11 +11,19 @@ PluginComponent {
 
     // === State ===
     property var providers: []
+    property var opencodeProviders: []
+    property var openaiProviders: []
+    property string activeTab: "opencode"
     property bool isLoading: false
     property bool hasError: false
     property string errorMessage: ""
+    property string opencodeError: ""
+    property string openaiError: ""
     property string lastUpdated: ""
-    property string rawJsonBuffer: ""
+    property string opencodeJsonBuffer: ""
+    property string openaiJsonBuffer: ""
+    property int pendingFetches: 0
+    property string barProvider: pluginData.barProvider || "auto"
 
     // === Settings ===
     property int refreshIntervalMs: {
@@ -28,28 +36,59 @@ PluginComponent {
         if (providers.length === 0)
             return null;
         var filtered = providers.filter(function (p) {
-            return p.usage && p.usage.rolling && !p.error;
+            return p.usage && root.primaryUsage(p.usage) && !p.error;
         });
         if (filtered.length === 0)
             return null;
         var highest = filtered[0];
         for (var i = 1; i < filtered.length; i++) {
-            if (filtered[i].usage.rolling.usedPercent > highest.usage.rolling.usedPercent)
+            if (root.primaryUsage(filtered[i].usage).usedPercent > root.primaryUsage(highest.usage).usedPercent)
                 highest = filtered[i];
         }
         return highest;
     }
 
     readonly property real highestPercent: {
-        if (!highestProvider || !highestProvider.usage || !highestProvider.usage.rolling)
+        if (!highestProvider || !highestProvider.usage || !root.primaryUsage(highestProvider.usage))
             return 0;
-        return highestProvider.usage.rolling.usedPercent;
+        return root.primaryUsage(highestProvider.usage).usedPercent;
     }
 
     readonly property string highestName: {
         if (!highestProvider)
             return "N/A";
         return formatProviderName(highestProvider.provider);
+    }
+
+    readonly property var barProviders: {
+        var list = root.providers.filter(function (p) {
+            return p.usage && root.primaryUsage(p.usage) && !p.error;
+        });
+        if (root.barProvider === "opencode") {
+            list = list.filter(function (p) { return p.provider === "opencode-go"; });
+        } else if (root.barProvider === "openai") {
+            list = list.filter(function (p) { return p.provider === "codex"; });
+        } else if (root.barProvider === "both") {
+            list = list.filter(function (p) { return p.provider === "opencode-go" || p.provider === "codex"; });
+        }
+        return list;
+    }
+
+    readonly property var barHighestProvider: {
+        if (root.barProviders.length === 0)
+            return null;
+        var highest = root.barProviders[0];
+        for (var i = 1; i < root.barProviders.length; i++) {
+            if (root.primaryUsage(root.barProviders[i].usage).usedPercent > root.primaryUsage(highest.usage).usedPercent)
+                highest = root.barProviders[i];
+        }
+        return highest;
+    }
+
+    readonly property real barHighestPercent: {
+        if (!root.barHighestProvider || !root.barHighestProvider.usage || !root.primaryUsage(root.barHighestProvider.usage))
+            return 0;
+        return root.primaryUsage(root.barHighestProvider.usage).usedPercent;
     }
 
     // === Helpers ===
@@ -70,7 +109,101 @@ PluginComponent {
     function formatProviderName(name) {
         if (name === "opencode-go")
             return "Opencode";
+        if (name === "codex")
+            return "OpenAI";
         return capitalizeFirst(name);
+    }
+
+    function providerLogoPath(provider) {
+        var isLight = !!SessionData.isLightMode;
+        if (provider === "opencode" || provider === "opencode-go") {
+            return isLight ? "opencode-logo-dark-square.svg" : "opencode-logo-light-square.svg";
+        }
+        if (provider === "openai" || provider === "codex") {
+            return isLight ? "OpenAI-black-monoblossom.svg" : "OpenAI-white-monoblossom.svg";
+        }
+        return "";
+    }
+
+    function currentProviders() {
+        return activeTab === "openai" ? openaiProviders : opencodeProviders;
+    }
+
+    function currentError() {
+        return activeTab === "openai" ? openaiError : opencodeError;
+    }
+
+    function primaryUsage(usage) {
+        if (!usage)
+            return null;
+        return usage.rolling || usage.primary || null;
+    }
+
+    function secondaryUsage(usage) {
+        if (!usage)
+            return null;
+        return usage.weekly || usage.secondary || null;
+    }
+
+    function tertiaryUsage(usage) {
+        if (!usage)
+            return null;
+        return usage.monthly || null;
+    }
+
+    function primaryLabel(provider) {
+        return provider === "codex" ? "Primary" : "Session";
+    }
+
+    function secondaryLabel(provider) {
+        return provider === "codex" ? "Secondary" : "Weekly";
+    }
+
+    function mergeProviders() {
+        root.providers = root.opencodeProviders.concat(root.openaiProviders);
+    }
+
+    function parseProviderOutput(target, raw) {
+        var data = JSON.parse(raw);
+        if (!Array.isArray(data))
+            data = [data];
+        if (target === "openai") {
+            root.openaiProviders = data;
+            root.openaiError = "";
+        } else {
+            root.opencodeProviders = data;
+            root.opencodeError = "";
+        }
+        root.mergeProviders();
+        root.hasError = root.opencodeError !== "" || root.openaiError !== "";
+        root.errorMessage = root.currentError();
+        root.lastUpdated = Qt.formatDateTime(new Date(), "hh:mm:ss");
+    }
+
+    function finishFetch(target, exitCode, raw) {
+        if (root.pendingFetches > 0)
+            root.pendingFetches--;
+        root.isLoading = root.pendingFetches > 0;
+
+        if (exitCode === 0 && raw.length > 0) {
+            try {
+                root.parseProviderOutput(target, raw);
+            } catch (e) {
+                console.warn("opentracker: JSON parse error:", e);
+                if (target === "openai")
+                    root.openaiError = "Failed to parse OpenAI output";
+                else
+                    root.opencodeError = "Failed to parse Opencode output";
+            }
+        } else if (exitCode !== 0) {
+            if (target === "openai")
+                root.openaiError = "OpenAI fetch exited with code " + exitCode;
+            else
+                root.opencodeError = "Opencode fetch exited with code " + exitCode;
+        }
+
+        root.hasError = root.opencodeError !== "" || root.openaiError !== "";
+        root.errorMessage = root.currentError();
     }
 
     function formatTimeUntil(iso) {
@@ -107,52 +240,57 @@ PluginComponent {
 
     // === Usage fetch ===
     Process {
-        id: procUsage
+        id: procOpencode
         command: ["opentracker", "fetch", "opencode-go"]
         stdout: SplitParser {
             splitMarker: ""
             onRead: data => {
-                root.rawJsonBuffer += data;
+                root.opencodeJsonBuffer += data;
             }
         }
         stderr: SplitParser {
-            onRead: line => console.warn("opentracker stderr:", line)
+            onRead: line => console.warn("opentracker opencode stderr:", line)
         }
         onExited: exitCode => {
-            root.isLoading = false;
-            if (exitCode === 0 && root.rawJsonBuffer.length > 0) {
-                try {
-                    var data = JSON.parse(root.rawJsonBuffer);
-                    if (!Array.isArray(data))
-                        data = [data];
-                    root.providers = data;
-                    root.hasError = false;
-                    root.errorMessage = "";
-                    root.lastUpdated = Qt.formatDateTime(new Date(), "hh:mm:ss");
-                } catch (e) {
-                    console.warn("opentracker: JSON parse error:", e);
-                    root.hasError = true;
-                    root.errorMessage = "Failed to parse opentracker output";
-                }
-            } else if (exitCode !== 0) {
-                root.hasError = true;
-                root.errorMessage = "opentracker exited with code " + exitCode;
+            root.finishFetch("opencode", exitCode, root.opencodeJsonBuffer);
+            root.opencodeJsonBuffer = "";
+        }
+    }
+
+    Process {
+        id: procOpenai
+        command: ["opentracker", "fetch", "codex"]
+        stdout: SplitParser {
+            splitMarker: ""
+            onRead: data => {
+                root.openaiJsonBuffer += data;
             }
-            root.rawJsonBuffer = "";
+        }
+        stderr: SplitParser {
+            onRead: line => console.warn("opentracker openai stderr:", line)
+        }
+        onExited: exitCode => {
+            root.finishFetch("openai", exitCode, root.openaiJsonBuffer);
+            root.openaiJsonBuffer = "";
         }
     }
 
     function refresh(force) {
-        if (procUsage.running)
+        if (procOpencode.running || procOpenai.running)
             return;
         root.isLoading = true;
-        root.rawJsonBuffer = "";
+        root.pendingFetches = 2;
+        root.opencodeJsonBuffer = "";
+        root.openaiJsonBuffer = "";
         if (force) {
-            procUsage.command = ["opentracker", "fetch", "opencode-go", "--force"];
+            procOpencode.command = ["opentracker", "fetch", "opencode-go", "--force"];
+            procOpenai.command = ["opentracker", "fetch", "codex", "--force"];
         } else {
-            procUsage.command = ["opentracker", "fetch", "opencode-go"];
+            procOpencode.command = ["opentracker", "fetch", "opencode-go"];
+            procOpenai.command = ["opentracker", "fetch", "codex"];
         }
-        procUsage.running = true;
+        procOpencode.running = true;
+        procOpenai.running = true;
     }
 
     Timer {
@@ -174,23 +312,50 @@ PluginComponent {
             DankIcon {
                 name: "monitoring"
                 size: Theme.iconSize - 6
-                color: root.getUsageColor(root.highestPercent)
+                color: root.getUsageColor(root.barHighestPercent)
                 anchors.verticalCenter: parent.verticalCenter
+                visible: root.barProviders.length > 0
+            }
+
+            Repeater {
+                model: root.barProviders
+
+                Row {
+                    spacing: 2
+                    anchors.verticalCenter: parent.verticalCenter
+
+                    Image {
+                        width: 14
+                        height: 14
+                        source: root.providerLogoPath(modelData.provider)
+                        sourceSize.width: 14
+                        sourceSize.height: 14
+                        fillMode: Image.PreserveAspectFit
+                        anchors.verticalCenter: parent.verticalCenter
+                    }
+
+                    StyledText {
+                        text: root.formatProviderName(modelData.provider) + " " + Math.round(root.primaryUsage(modelData.usage).usedPercent) + "%"
+                        font.pixelSize: Theme.fontSizeSmall
+                        font.weight: Font.Medium
+                        color: root.getUsageColor(root.primaryUsage(modelData.usage).usedPercent)
+                        anchors.verticalCenter: parent.verticalCenter
+                    }
+                }
             }
 
             StyledText {
+                visible: root.barProviders.length === 0
                 text: {
-                    if (root.hasError && root.providers.length === 0)
-                        return "ERR";
                     if (root.isLoading && root.providers.length === 0)
                         return "...";
-                    if (!root.highestProvider)
-                        return "N/A";
-                    return root.highestName + " " + Math.round(root.highestPercent) + "%";
+                    if (root.hasError && root.providers.length === 0)
+                        return "ERR";
+                    return "N/A";
                 }
                 font.pixelSize: Theme.fontSizeSmall
                 font.weight: Font.Medium
-                color: root.getUsageColor(root.highestPercent)
+                color: root.getUsageColor(root.barHighestPercent)
                 anchors.verticalCenter: parent.verticalCenter
             }
         }
@@ -204,19 +369,19 @@ PluginComponent {
             DankIcon {
                 name: "monitoring"
                 size: Theme.iconSize - 6
-                color: root.getUsageColor(root.highestPercent)
+                color: root.getUsageColor(root.barHighestPercent)
                 anchors.horizontalCenter: parent.horizontalCenter
             }
 
             StyledText {
                 text: {
-                    if (!root.highestProvider)
+                    if (!root.barHighestProvider)
                         return "--";
-                    return Math.round(root.highestPercent) + "%";
+                    return Math.round(root.barHighestPercent) + "%";
                 }
                 font.pixelSize: Theme.fontSizeSmall
                 font.weight: Font.Medium
-                color: root.getUsageColor(root.highestPercent)
+                color: root.getUsageColor(root.barHighestPercent)
                 anchors.horizontalCenter: parent.horizontalCenter
             }
         }
@@ -275,13 +440,69 @@ PluginComponent {
                     width: parent.width
                     spacing: Theme.spacingS
 
+                    Row {
+                        width: parent.width
+                        spacing: Theme.spacingXS
+
+                        Repeater {
+                            model: [
+                                { key: "opencode", label: "Opencode" },
+                                { key: "openai", label: "OpenAI" }
+                            ]
+
+                            Rectangle {
+                                required property var modelData
+
+                                width: (mainCol.width - Theme.spacingXS) / 2
+                                height: 72
+                                radius: Theme.cornerRadius
+                                color: root.activeTab === modelData.key ? Theme.surfaceContainerHighest : Theme.surfaceContainerHigh
+                                border.width: root.activeTab === modelData.key ? 2 : 0
+                                border.color: Theme.primary
+
+                                Column {
+                                    anchors.centerIn: parent
+                                    spacing: 2
+
+                                    Image {
+                                        anchors.horizontalCenter: parent.horizontalCenter
+                                        width: 28
+                                        height: 28
+                                        source: root.providerLogoPath(modelData.key)
+                                        sourceSize.width: 28
+                                        sourceSize.height: 28
+                                        fillMode: Image.PreserveAspectFit
+                                    }
+
+                                    StyledText {
+                                        anchors.horizontalCenter: parent.horizontalCenter
+                                        text: modelData.label
+                                        font.pixelSize: Theme.fontSizeSmall
+                                        font.weight: Font.Medium
+                                        color: root.activeTab === modelData.key ? Theme.primary : Theme.surfaceText
+                                    }
+                                }
+
+                                MouseArea {
+                                    anchors.fill: parent
+                                    hoverEnabled: true
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: {
+                                        root.activeTab = modelData.key;
+                                        root.errorMessage = root.currentError();
+                                    }
+                                }
+                            }
+                        }
+                    }
+
                     // Error banner
                     StyledRect {
                         width: parent.width
                         height: errCol.implicitHeight + Theme.spacingM * 2
                         radius: Theme.cornerRadius
                         color: Qt.rgba(Theme.error.r, Theme.error.g, Theme.error.b, 0.15)
-                        visible: root.hasError && root.providers.length === 0
+                        visible: root.currentError() !== "" && root.currentProviders().length === 0
 
                         Column {
                             id: errCol
@@ -298,7 +519,7 @@ PluginComponent {
                                     anchors.verticalCenter: parent.verticalCenter
                                 }
                                 StyledText {
-                                    text: root.errorMessage
+                                    text: root.currentError()
                                     font.pixelSize: Theme.fontSizeMedium
                                     color: Theme.error
                                     anchors.verticalCenter: parent.verticalCenter
@@ -309,7 +530,7 @@ PluginComponent {
 
                     // Loading
                     StyledText {
-                        visible: root.isLoading && root.providers.length === 0
+                        visible: root.isLoading && root.currentProviders().length === 0
                         text: "Fetching usage data..."
                         font.pixelSize: Theme.fontSizeMedium
                         color: Theme.surfaceVariantText
@@ -319,7 +540,7 @@ PluginComponent {
 
                     // Provider cards
                     Repeater {
-                        model: root.providers
+                        model: root.currentProviders()
 
                         StyledRect {
                             required property var modelData
@@ -342,14 +563,37 @@ PluginComponent {
                                 Row {
                                     spacing: Theme.spacingS
 
+                                    Image {
+                                        width: 22
+                                        height: 22
+                                        source: root.providerLogoPath(modelData.provider)
+                                        sourceSize.width: 22
+                                        sourceSize.height: 22
+                                        fillMode: Image.PreserveAspectFit
+                                        anchors.verticalCenter: parent.verticalCenter
+                                    }
+
                                     StyledText {
-                                        text: root.capitalizeFirst(modelData.provider)
+                                        text: root.formatProviderName(modelData.provider)
                                         font.pixelSize: Theme.fontSizeLarge
                                         font.weight: Font.Bold
                                         color: Theme.surfaceText
                                     }
 
+                                    StyledText {
+                                        visible: !!modelData.usage && !!modelData.usage.plan
+                                        text: modelData.usage && modelData.usage.plan ? modelData.usage.plan : ""
+                                        font.pixelSize: Theme.fontSizeSmall
+                                        color: Theme.surfaceVariantText
+                                        anchors.verticalCenter: parent.verticalCenter
+                                    }
+                                }
 
+                                StyledText {
+                                    visible: !!modelData.usage && modelData.usage.creditsRemaining !== undefined
+                                    text: "Credits remaining: " + (modelData.usage ? modelData.usage.creditsRemaining : "")
+                                    font.pixelSize: Theme.fontSizeSmall
+                                    color: Theme.surfaceVariantText
                                 }
 
                                 // Error state for this provider
@@ -372,11 +616,11 @@ PluginComponent {
                                     }
                                 }
 
-                                // Rolling window
+                                // Primary window
                                 Column {
                                     width: parent.width
                                     spacing: 2
-                                    visible: !!modelData.usage && !!modelData.usage.rolling
+                                    visible: !!modelData.usage && !!root.primaryUsage(modelData.usage)
 
                                     Item {
                                         width: parent.width
@@ -385,7 +629,7 @@ PluginComponent {
                                         StyledText {
                                             id: primLabel
                                             anchors.left: parent.left
-                                            text: "Session"
+                                            text: root.primaryLabel(modelData.provider)
                                             font.pixelSize: Theme.fontSizeSmall
                                             color: Theme.surfaceVariantText
                                         }
@@ -393,14 +637,15 @@ PluginComponent {
                                             id: primValue
                                             anchors.right: parent.right
                                             text: {
-                                                if (!modelData.usage || !modelData.usage.rolling)
+                                                var usage = root.primaryUsage(modelData.usage);
+                                                if (!usage)
                                                     return "";
-                                                var pct = Math.round(modelData.usage.rolling.usedPercent);
-                                                var reset = root.formatTimeUntil(modelData.usage.rolling.resetsAt);
+                                                var pct = Math.round(usage.usedPercent);
+                                                var reset = root.formatTimeUntil(usage.resetsAt);
                                                 return pct + "%" + (reset ? " \u00B7 " + reset : "");
                                             }
                                             font.pixelSize: Theme.fontSizeSmall
-                                            color: root.getUsageColor(modelData.usage && modelData.usage.rolling ? modelData.usage.rolling.usedPercent : 0)
+                                            color: root.getUsageColor(root.primaryUsage(modelData.usage) ? root.primaryUsage(modelData.usage).usedPercent : 0)
                                         }
                                     }
 
@@ -412,12 +657,13 @@ PluginComponent {
 
                                         Rectangle {
                                             width: {
-                                                var pct = modelData.usage && modelData.usage.rolling ? modelData.usage.rolling.usedPercent : 0;
+                                                var usage = root.primaryUsage(modelData.usage);
+                                                var pct = usage ? usage.usedPercent : 0;
                                                 return Math.min(1, pct / 100) * parent.width;
                                             }
                                             height: parent.height
                                             radius: parent.radius
-                                            color: root.getUsageColor(modelData.usage && modelData.usage.rolling ? modelData.usage.rolling.usedPercent : 0)
+                                            color: root.getUsageColor(root.primaryUsage(modelData.usage) ? root.primaryUsage(modelData.usage).usedPercent : 0)
                                             Behavior on width {
                                                 NumberAnimation {
                                                     duration: 300
@@ -428,11 +674,11 @@ PluginComponent {
                                     }
                                 }
 
-                                // Weekly window
+                                // Secondary window
                                 Column {
                                     width: parent.width
                                     spacing: 2
-                                    visible: !!modelData.usage && !!modelData.usage.weekly
+                                    visible: !!modelData.usage && !!root.secondaryUsage(modelData.usage)
 
                                     Item {
                                         width: parent.width
@@ -441,7 +687,7 @@ PluginComponent {
                                         StyledText {
                                             id: secLabel
                                             anchors.left: parent.left
-                                            text: "Weekly"
+                                            text: root.secondaryLabel(modelData.provider)
                                             font.pixelSize: Theme.fontSizeSmall
                                             color: Theme.surfaceVariantText
                                         }
@@ -449,14 +695,15 @@ PluginComponent {
                                             id: secValue
                                             anchors.right: parent.right
                                             text: {
-                                                if (!modelData.usage || !modelData.usage.weekly)
+                                                var usage = root.secondaryUsage(modelData.usage);
+                                                if (!usage)
                                                     return "";
-                                                var pct = Math.round(modelData.usage.weekly.usedPercent);
-                                                var reset = root.formatTimeUntil(modelData.usage.weekly.resetsAt);
+                                                var pct = Math.round(usage.usedPercent);
+                                                var reset = root.formatTimeUntil(usage.resetsAt);
                                                 return pct + "%" + (reset ? " \u00B7 " + reset : "");
                                             }
                                             font.pixelSize: Theme.fontSizeSmall
-                                            color: root.getUsageColor(modelData.usage && modelData.usage.weekly ? modelData.usage.weekly.usedPercent : 0)
+                                            color: root.getUsageColor(root.secondaryUsage(modelData.usage) ? root.secondaryUsage(modelData.usage).usedPercent : 0)
                                         }
                                     }
 
@@ -468,12 +715,13 @@ PluginComponent {
 
                                         Rectangle {
                                             width: {
-                                                var pct = modelData.usage && modelData.usage.weekly ? modelData.usage.weekly.usedPercent : 0;
+                                                var usage = root.secondaryUsage(modelData.usage);
+                                                var pct = usage ? usage.usedPercent : 0;
                                                 return Math.min(1, pct / 100) * parent.width;
                                             }
                                             height: parent.height
                                             radius: parent.radius
-                                            color: root.getUsageColor(modelData.usage && modelData.usage.weekly ? modelData.usage.weekly.usedPercent : 0)
+                                            color: root.getUsageColor(root.secondaryUsage(modelData.usage) ? root.secondaryUsage(modelData.usage).usedPercent : 0)
                                             Behavior on width {
                                                 NumberAnimation {
                                                     duration: 300
@@ -488,7 +736,7 @@ PluginComponent {
                                 Column {
                                     width: parent.width
                                     spacing: 2
-                                    visible: !!modelData.usage && !!modelData.usage.monthly
+                                    visible: !!modelData.usage && !!root.tertiaryUsage(modelData.usage)
 
                                     Item {
                                         width: parent.width
@@ -505,14 +753,15 @@ PluginComponent {
                                             id: terValue
                                             anchors.right: parent.right
                                             text: {
-                                                if (!modelData.usage || !modelData.usage.monthly)
+                                                var usage = root.tertiaryUsage(modelData.usage);
+                                                if (!usage)
                                                     return "";
-                                                var pct = Math.round(modelData.usage.monthly.usedPercent);
-                                                var reset = root.formatTimeUntil(modelData.usage.monthly.resetsAt);
+                                                var pct = Math.round(usage.usedPercent);
+                                                var reset = root.formatTimeUntil(usage.resetsAt);
                                                 return pct + "%" + (reset ? " \u00B7 " + reset : "");
                                             }
                                             font.pixelSize: Theme.fontSizeSmall
-                                            color: root.getUsageColor(modelData.usage && modelData.usage.monthly ? modelData.usage.monthly.usedPercent : 0)
+                                            color: root.getUsageColor(root.tertiaryUsage(modelData.usage) ? root.tertiaryUsage(modelData.usage).usedPercent : 0)
                                         }
                                     }
 
@@ -524,12 +773,13 @@ PluginComponent {
 
                                         Rectangle {
                                             width: {
-                                                var pct = modelData.usage && modelData.usage.monthly ? modelData.usage.monthly.usedPercent : 0;
+                                                var usage = root.tertiaryUsage(modelData.usage);
+                                                var pct = usage ? usage.usedPercent : 0;
                                                 return Math.min(1, pct / 100) * parent.width;
                                             }
                                             height: parent.height
                                             radius: parent.radius
-                                            color: root.getUsageColor(modelData.usage && modelData.usage.monthly ? modelData.usage.monthly.usedPercent : 0)
+                                            color: root.getUsageColor(root.tertiaryUsage(modelData.usage) ? root.tertiaryUsage(modelData.usage).usedPercent : 0)
                                         }
                                     }
                                 }
@@ -543,8 +793,8 @@ PluginComponent {
 
                     // No providers
                     StyledText {
-                        visible: root.providers.length === 0 && !root.hasError && !root.isLoading
-                        text: "No providers found. Run 'opentracker login opencode-go' to configure."
+                        visible: root.currentProviders().length === 0 && root.currentError() === "" && !root.isLoading
+                        text: root.activeTab === "openai" ? "No OpenAI usage found. Run 'opentracker fetch codex' to configure." : "No providers found. Run 'opentracker login opencode-go' to configure."
                         font.pixelSize: Theme.fontSizeMedium
                         color: Theme.surfaceVariantText
                         width: parent.width

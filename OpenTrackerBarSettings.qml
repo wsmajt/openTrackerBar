@@ -17,7 +17,7 @@ PluginSettings {
 
     StyledText {
         width: parent.width
-        text: "Monitor OpenCode.ai usage via opentracker CLI. Tracks session, weekly and monthly rate windows."
+        text: "Monitor Opencode and OpenAI Codex usage via opentracker CLI. Click the widget to switch between provider tabs."
         font.pixelSize: Theme.fontSizeSmall
         color: Theme.surfaceVariantText
         wrapMode: Text.WordWrap
@@ -82,39 +82,43 @@ PluginSettings {
         opacity: 0.3
     }
 
-    // --- Setup ---
+    // --- Bar Provider ---
 
     StyledText {
         width: parent.width
-        text: "Setup"
+        text: "Bar Display"
         font.pixelSize: Theme.fontSizeMedium
         font.weight: Font.Medium
         color: Theme.surfaceText
     }
 
-    Column {
-        width: parent.width
-        spacing: Theme.spacingXS
-        leftPadding: Theme.spacingM
-        bottomPadding: Theme.spacingL
-
-        Repeater {
-            model: [
-                "1. Install opentracker: yay -S opentracker-cli",
-                "2. Run: opentracker login opencode-go",
-                "3. Log in to opencode.ai in your browser",
-                "4. Export cookies (Netscape format) to ~/.config/opentracker/opencode-cookies.txt",
-                "5. Run: opentracker fetch opencode-go (first run will ask for workspace ID)"
-            ]
-
-            StyledText {
-                required property string modelData
-                text: modelData
-                font.pixelSize: Theme.fontSizeSmall
-                color: Theme.surfaceVariantText
-                width: parent.width - Theme.spacingM
-                wrapMode: Text.WordWrap
-            }
+    DankDropdown {
+        id: barProviderDropdown
+        text: "Bar Provider"
+        description: "Which providers to show in the bar pill"
+        currentValue: root.loadValue("barProvider", "auto")
+        options: ["auto", "opencode", "openai", "both"]
+        dropdownWidth: 240
+        onValueChanged: function (value) {
+            root.saveValue("barProvider", value);
         }
     }
+
+    StyledText {
+        width: parent.width
+        leftPadding: Theme.spacingM
+        text: {
+            var v = barProviderDropdown.currentValue;
+            if (v === "auto") return "Shows the provider with the highest usage";
+            if (v === "opencode") return "Shows only Opencode usage";
+            if (v === "openai") return "Shows only OpenAI usage";
+            if (v === "both") return "Shows both Opencode and OpenAI usage";
+            return "";
+        }
+        font.pixelSize: Theme.fontSizeSmall
+        font.italic: true
+        color: Theme.surfaceVariantText
+        wrapMode: Text.WordWrap
+    }
+
 }
