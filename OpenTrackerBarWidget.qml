@@ -65,11 +65,17 @@ PluginComponent {
             return p.usage && root.primaryUsage(p.usage) && !p.error;
         });
         if (root.barProvider === "opencode") {
-            list = list.filter(function (p) { return p.provider === "opencode-go"; });
+            list = list.filter(function (p) {
+                return p.provider === "opencode-go";
+            });
         } else if (root.barProvider === "openai") {
-            list = list.filter(function (p) { return p.provider === "codex"; });
+            list = list.filter(function (p) {
+                return p.provider === "codex";
+            });
         } else if (root.barProvider === "both") {
-            list = list.filter(function (p) { return p.provider === "opencode-go" || p.provider === "codex"; });
+            list = list.filter(function (p) {
+                return p.provider === "opencode-go" || p.provider === "codex";
+            });
         }
         return list;
     }
@@ -152,11 +158,11 @@ PluginComponent {
     }
 
     function primaryLabel(provider) {
-        return provider === "codex" ? "Primary" : "Session";
+        return provider === "codex" ? "Session" : "Session";
     }
 
     function secondaryLabel(provider) {
-        return provider === "codex" ? "Secondary" : "Weekly";
+        return provider === "codex" ? "Weekly" : "Weekly";
     }
 
     function mergeProviders() {
@@ -446,8 +452,14 @@ PluginComponent {
 
                         Repeater {
                             model: [
-                                { key: "opencode", label: "Opencode" },
-                                { key: "openai", label: "OpenAI" }
+                                {
+                                    key: "opencode",
+                                    label: "Opencode"
+                                },
+                                {
+                                    key: "openai",
+                                    label: "OpenAI"
+                                }
                             ]
 
                             Rectangle {
@@ -783,10 +795,6 @@ PluginComponent {
                                         }
                                     }
                                 }
-
-
-
-
                             }
                         }
                     }
