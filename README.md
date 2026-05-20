@@ -1,5 +1,8 @@
 # OpenTrackerBar
 
+<img width="550" height="438" alt="obraz" src="https://github.com/user-attachments/assets/fad23f59-286b-4c00-a01d-bae6bed4f1ca" />
+
+
 [DankMaterialShell](https://github.com/DankMaterialShell/DankMaterialShell) plugin that tracks Opencode and OpenAI Codex usage limits via the [opentracker](https://github.com/wsmajt/opentracker) CLI.
 
 ## Requirements
@@ -27,3 +30,6 @@ opentracker fetch codex
 ## Usage
 
 Enable the `OpenTrackerBar` plugin in DankMaterialShell settings. Click the widget and switch between the Opencode and OpenAI tabs.
+
+## Credits
+[zakstam](https://github.com/zakstam/dms-codexbar) - dms-codexbar
