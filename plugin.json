@@ -2,7 +2,7 @@
   "id": "openTrackerBar",
   "name": "OpenTrackerBar",
   "description": "Monitor AI provider usage via opentracker CLI",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "author": "smajt",
   "icon": "monitoring",
   "type": "widget",

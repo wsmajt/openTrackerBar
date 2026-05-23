@@ -123,10 +123,10 @@ PluginComponent {
     function providerLogoPath(provider) {
         var isLight = !!SessionData.isLightMode;
         if (provider === "opencode" || provider === "opencode-go") {
-            return isLight ? "opencode-logo-dark-square.svg" : "opencode-logo-light-square.svg";
+            return isLight ? "icons/opencode-go-dark.svg" : "icons/opencode-go-light.svg";
         }
         if (provider === "openai" || provider === "codex") {
-            return isLight ? "OpenAI-black-monoblossom.svg" : "OpenAI-white-monoblossom.svg";
+            return isLight ? "icons/codex-dark.svg" : "icons/codex-light.svg";
         }
         return "";
     }
