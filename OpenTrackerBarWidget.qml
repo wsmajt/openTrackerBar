@@ -315,20 +315,22 @@ PluginComponent {
         Row {
             spacing: Theme.spacingXS
 
-            DankIcon {
-                name: "monitoring"
-                size: Theme.iconSize - 6
-                color: root.getUsageColor(root.barHighestPercent)
-                anchors.verticalCenter: parent.verticalCenter
-                visible: root.barProviders.length > 0
-            }
-
             Repeater {
                 model: root.barProviders
 
                 Row {
-                    spacing: 2
+                    spacing: 6
                     anchors.verticalCenter: parent.verticalCenter
+
+                    Rectangle {
+                        visible: index > 0
+                        width: 1
+                        height: 14
+                        radius: 1
+                        color: Theme.outline
+                        opacity: 0.45
+                        anchors.verticalCenter: parent.verticalCenter
+                    }
 
                     Image {
                         width: 14
@@ -371,13 +373,6 @@ PluginComponent {
     verticalBarPill: Component {
         Column {
             spacing: Theme.spacingXS
-
-            DankIcon {
-                name: "monitoring"
-                size: Theme.iconSize - 6
-                color: root.getUsageColor(root.barHighestPercent)
-                anchors.horizontalCenter: parent.horizontalCenter
-            }
 
             StyledText {
                 text: {
