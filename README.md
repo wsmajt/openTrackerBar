@@ -12,8 +12,12 @@
 ## Install
 
 ```bash
-git clone https://github.com/wsmajt/OpenTrackerBar.git ~/.config/DankMaterialShell/plugins/OpenTrackerBar
+dms plugins install openTrackerBar
 ```
+
+Then add the widget to a DankBar in DMS settings.
+
+Alternatively, find OpenTrackerBar by searching in DMS Settings → Plugins, or browse the [Dank plugins directory](https://duxlabs.dev/plugins).
 
 ## Setup
 
