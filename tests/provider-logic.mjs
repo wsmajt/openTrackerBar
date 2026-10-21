@@ -45,7 +45,7 @@ function makeRoot() {
     for (const key of ["providerErrors", "providerTimes", "clockNow", "refreshIntervalMs", "fetchActive", "fetchTimeouts", "fetchAwaitingExit", "fetchStarted", "fetchStderr", "pendingFetches", "isLoading", "activeTab", "localStatsEnabled", "localStats", "localStatsLoading", "localStatsError", "localStatsBuffer", "localStatsStderr", "localStatsStarted", "localStatsAwaitingExit", "localStatsUpdatedAt", "interactionActive", "barSourceWindows", "claudeProviders", "claudeError"])
         Object.defineProperty(globals, key, { get: () => root[key], set: value => { root[key] = value; } });
     const context = vm.createContext(globals);
-    const names = ["parseProviderOutput", "mergeProviders", "setProviderError", "finishFetch", "providerError", "providerHint", "providerRecoveryCommand", "classifyProviderFailure", "appendFetchStderr", "markFetchStarted", "providerUpdatedAt", "providerIsStale", "providerUpdatedLabel", "providerBalanceText", "barProviderText", "primaryUsage", "secondaryUsage", "tertiaryUsage", "claudeUsageWindow", "providerUsageWindows", "validNumber", "validUsageWindow", "hasZenBalance", "getUsageColor", "formatProviderName", "providerLogoPath", "providerTab", "currentProviders", "currentError", "normalizeBarSources", "legacyBarSources", "isBarSourceSelected", "toggleBarSource", "normalizeBarSourceWindows", "selectedWindowKey", "availableBarWindows", "barUsageWindow", "barWindowLabel", "setBarSourceWindow", "setLocalStatsEnabled", "selectBarProviders", "primaryLabel", "barTooltipText", "formatTimeUntil", "startFetch", "refreshProvider", "timeoutFetch", "savePluginSetting", "setUsageDisplayMode", "setNotificationsEnabled", "setZenBalanceThreshold", "displayPercent", "alertWindows", "alertState", "alertPrefs", "removeAlertReservation", "removeAlertReservationForProvider", "saveAlertState", "baselineAlertSource", "evaluateProviderAlerts", "startNextAlert", "finishAlert", "localDayBounds", "parseLocalStats", "ensureLocalStats", "invalidateLocalStatsForDay", "refreshLocalStats", "finishLocalStats", "localStatsNeedsUpgrade", "timeoutLocalStats"];
+    const names = ["parseProviderOutput", "mergeProviders", "setProviderError", "finishFetch", "providerError", "providerHint", "providerRecoveryCommand", "classifyProviderFailure", "appendFetchStderr", "markFetchStarted", "providerUpdatedAt", "providerIsStale", "providerUpdatedLabel", "providerBalanceText", "barProviderText", "primaryUsage", "secondaryUsage", "tertiaryUsage", "claudeUsageWindow", "providerUsageWindows", "validNumber", "validUsageWindow", "hasZenBalance", "getUsageColor", "formatProviderName", "providerLogoPath", "providerTab", "currentProviders", "currentError", "normalizeBarSources", "legacyBarSources", "isBarSourceSelected", "toggleBarSource", "normalizeBarSourceWindows", "selectedWindowKey", "availableBarWindows", "barUsageWindow", "barWindowLabel", "setBarSourceWindow", "setLocalStatsEnabled", "selectBarProviders", "primaryLabel", "barTooltipText", "formatTimeUntil", "startFetch", "refreshProvider", "timeoutFetch", "savePluginSetting", "setUsageDisplayMode", "setNotificationsEnabled", "setZenBalanceThreshold", "displayPercent", "alertWindows", "alertState", "alertPrefs", "removeAlertReservation", "removeAlertReservationForProvider", "saveAlertState", "baselineAlertSource", "evaluateProviderAlerts", "startNextAlert", "finishAlert", "localDayBounds", "parseLocalStats", "ensureLocalStats", "invalidateLocalStatsForDay", "refreshLocalStats", "finishLocalStats", "localStatsMissingBinary", "localStatsNeedsUpgrade", "timeoutLocalStats"];
     for (const name of names) root[name] = vm.runInContext(`(${functionSource(name)})`, context);
     return root;
 }
@@ -760,6 +760,23 @@ test("unsupported stats CLI and timeout use fixed local errors", () => {
     root.localStatsStarted = true;
     root.finishLocalStats(-1, true);
     assert.equal(root.localStatsError, "Local statistics request timed out");
+});
+
+test("missing OpenCode CLI reports a specific local stats error", () => {
+    const root = makeRoot();
+    root.localStatsLoading = true;
+    root.localStatsStarted = true;
+    root.localStatsBuffer = "Error: OpenCode CLI was not found\nUsage:\n  opentracker stats opencode [flags]\n";
+    assert.equal(root.localStatsMissingBinary(), true);
+    root.finishLocalStats(1, false);
+    assert.equal(root.localStatsError, "OpenCode CLI was not found — install it or add it to PATH");
+    assert.equal(root.localStatsBuffer, "");
+    root.localStatsLoading = true;
+    root.localStatsStarted = true;
+    root.localStatsBuffer = "";
+    assert.equal(root.localStatsMissingBinary(), false);
+    root.finishLocalStats(1, false);
+    assert.equal(root.localStatsError, "Local statistics are unavailable");
 });
 
 test("process start detection uses the verified Process started signal", () => {

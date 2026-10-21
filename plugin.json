@@ -2,7 +2,7 @@
   "id": "openTrackerBar",
   "name": "OpenTrackerBar",
   "description": "Monitor Opencode Go, OpenAI Codex and Claude usage limits, plus Opencode Zen balance, via opentracker CLI",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "author": "smajt",
   "icon": "monitoring",
   "type": "widget",

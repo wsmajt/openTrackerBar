@@ -859,10 +859,14 @@ PluginComponent {
             root.localStatsUpdatedAt = Date.parse(parsed.updatedAt);
             root.localStatsError = "";
         } else {
-            root.localStatsError = exitCode !== 0 && root.localStatsNeedsUpgrade(root.localStatsStderr, root.localStatsStarted) ? "Update opentracker and OpenCode to enable local statistics" : timedOut ? "Local statistics request timed out" : "Local statistics are unavailable";
+            root.localStatsError = exitCode !== 0 && root.localStatsNeedsUpgrade(root.localStatsStderr, root.localStatsStarted) ? "Update opentracker and OpenCode to enable local statistics" : exitCode !== 0 && root.localStatsMissingBinary() ? "OpenCode CLI was not found — install it or add it to PATH" : timedOut ? "Local statistics request timed out" : "Local statistics are unavailable";
         }
         root.localStatsBuffer = "";
         root.localStatsStderr = "";
+    }
+
+    function localStatsMissingBinary() {
+        return String(root.localStatsBuffer || "").indexOf("OpenCode CLI was not found") !== -1;
     }
 
     function localStatsNeedsUpgrade(stderr, started) {

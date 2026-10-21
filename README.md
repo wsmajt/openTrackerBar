@@ -63,7 +63,7 @@ Desktop notifications are sent through the host's `dms notify` command at normal
 
 Enable local statistics in the popout preferences for a small **today's tokens and sessions** summary in the Opencode tab. This is local activity, not a usage limit or Zen balance, and is not included in bar pinning or quota alerts.
 
-This requires an opentracker build supporting `opentracker stats opencode` and an installed OpenCode CLI supporting `stats --json --standalone --days 0`. No cost estimates, project paths, messages, model lists, or historical charts are displayed.
+This requires an opentracker build supporting `opentracker stats opencode` and an installed OpenCode CLI supporting `stats --json --standalone --days 0`. No cost estimates, project paths, messages, model lists, or historical charts are displayed. If the widget reports that the OpenCode CLI was not found, install it or make it visible outside terminals: opentracker checks `OPENCODE_BIN`, then `PATH`, then `~/.bun/bin`, `~/.local/bin`, and `/usr/local/bin`.
 
 Statistics are requested only when the summary is enabled and the Opencode tab is open, with a five-minute cache and an explicit refresh action. They are not part of periodic quota refreshes. The CLI delegates aggregation to OpenCode rather than reading its database directly; OpenCode may create or migrate its own local storage when invoked.
 
