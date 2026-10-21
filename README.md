@@ -1,6 +1,6 @@
 # OpenTrackerBar
 
-<img width="550" height="438" alt="obraz" src="https://github.com/user-attachments/assets/fad23f59-286b-4c00-a01d-bae6bed4f1ca" />
+<img width="579" height="694" alt="obraz" src="https://raw.githubusercontent.com/wsmajt/openTrackerBar/refs/heads/main/Screenshot.png" />
 
 
 [DankMaterialShell](https://github.com/DankMaterialShell/DankMaterialShell) plugin that tracks Opencode Go usage limits, Opencode Zen balance, and OpenAI Codex and Claude usage limits via the [opentracker](https://github.com/wsmajt/opentracker) CLI.
