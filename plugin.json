@@ -1,8 +1,8 @@
 {
   "id": "openTrackerBar",
   "name": "OpenTrackerBar",
-  "description": "Monitor AI provider usage via opentracker CLI",
-  "version": "1.1.1",
+  "description": "Monitor Opencode Go, OpenAI Codex and Claude usage limits, plus Opencode Zen balance, via opentracker CLI",
+  "version": "1.2.0",
   "author": "smajt",
   "icon": "monitoring",
   "type": "widget",

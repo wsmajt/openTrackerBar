@@ -1,10 +1,14 @@
+pragma ComponentBehavior: Bound
+
 import QtQuick
+import QtQuick.Effects
 import Quickshell
 import Quickshell.Io
 import qs.Common
 import qs.Services
 import qs.Widgets
 import qs.Modules.Plugins
+import qs.DCommon.Widgets as DCommonWidgets
 
 PluginComponent {
     id: root
@@ -13,17 +17,54 @@ PluginComponent {
     property var providers: []
     property var opencodeProviders: []
     property var openaiProviders: []
+    property var claudeProviders: []
     property string activeTab: "opencode"
     property bool isLoading: false
     property bool hasError: false
     property string errorMessage: ""
     property string opencodeError: ""
     property string openaiError: ""
+    property string claudeError: ""
     property string lastUpdated: ""
     property string opencodeJsonBuffer: ""
+    property string opencodeZenJsonBuffer: ""
     property string openaiJsonBuffer: ""
+    property string claudeJsonBuffer: ""
     property int pendingFetches: 0
-    property string barProvider: pluginData.barProvider || "auto"
+    property var providerTimes: ({ "opencode-go": 0, "opencode-zen": 0, "codex": 0, "claude": 0 })
+    property var providerErrors: ({ "opencode-go": "", "opencode-zen": "", "codex": "", "claude": "" })
+    property var fetchActive: ({ "opencode-go": false, "opencode-zen": false, "codex": false, "claude": false })
+    property var fetchTimeouts: ({ "opencode-go": "", "opencode-zen": "", "codex": "", "claude": "" })
+    property var fetchAwaitingExit: ({ "opencode-go": false, "opencode-zen": false, "codex": false, "claude": false })
+    property var fetchStarted: ({ "opencode-go": false, "opencode-zen": false, "codex": false, "claude": false })
+    property var fetchStderr: ({ "opencode-go": "", "opencode-zen": "", "codex": "", "claude": "" })
+    property real clockNow: Date.now()
+    onClockNowChanged: root.invalidateLocalStatsForDay()
+    property int fetchTimeoutMs: 30000
+    readonly property var barSources: root.normalizeBarSources(root.pluginData && root.pluginData.barSources !== undefined ? root.pluginData.barSources : root.legacyBarSources(root.pluginData ? root.pluginData.barProvider : undefined))
+    readonly property string usageDisplayMode: root.pluginData && root.pluginData.usageDisplayMode === "remaining" ? "remaining" : "used"
+    readonly property var barSourceWindows: root.normalizeBarSourceWindows(root.pluginData ? root.pluginData.barSourceWindows : null)
+    readonly property bool notificationsEnabled: root.pluginData && root.pluginData.notificationsEnabled === true
+    readonly property real zenBalanceThreshold: {
+        var value = root.pluginData ? root.validNumber(root.pluginData.zenBalanceThreshold) : null;
+        return value !== null && value >= 0 ? value : 1;
+    }
+    property var alertQueue: []
+    property bool alertProcessBusy: false
+    property bool alertTimedOut: false
+    property var alertActiveRecord: null
+    property string alertOutput: ""
+    property int alertTimeoutMs: 15000
+    readonly property bool localStatsEnabled: root.pluginData && root.pluginData.localStatsEnabled === true
+    property var localStats: null
+    property bool localStatsLoading: false
+    property string localStatsError: ""
+    property string localStatsBuffer: ""
+    property string localStatsStderr: ""
+    property int localStatsTimeoutMs: 25000
+    property real localStatsUpdatedAt: 0
+    property bool localStatsAwaitingExit: false
+    property bool localStatsStarted: false
 
     // === Settings ===
     property int refreshIntervalMs: {
@@ -36,22 +77,22 @@ PluginComponent {
         if (providers.length === 0)
             return null;
         var filtered = providers.filter(function (p) {
-            return p.usage && root.primaryUsage(p.usage) && !p.error;
+            return p && p.usage && root.barUsageWindow(p.provider, p.usage) && !p.error;
         });
         if (filtered.length === 0)
             return null;
         var highest = filtered[0];
         for (var i = 1; i < filtered.length; i++) {
-            if (root.primaryUsage(filtered[i].usage).usedPercent > root.primaryUsage(highest.usage).usedPercent)
+            if (root.barUsageWindow(filtered[i].provider, filtered[i].usage).usedPercent > root.barUsageWindow(highest.provider, highest.usage).usedPercent)
                 highest = filtered[i];
         }
         return highest;
     }
 
     readonly property real highestPercent: {
-        if (!highestProvider || !highestProvider.usage || !root.primaryUsage(highestProvider.usage))
+        if (!highestProvider || !highestProvider.usage || !root.barUsageWindow(highestProvider.provider, highestProvider.usage))
             return 0;
-        return root.primaryUsage(highestProvider.usage).usedPercent;
+        return root.barUsageWindow(highestProvider.provider, highestProvider.usage).usedPercent;
     }
 
     readonly property string highestName: {
@@ -60,44 +101,167 @@ PluginComponent {
         return formatProviderName(highestProvider.provider);
     }
 
-    readonly property var barProviders: {
-        var list = root.providers.filter(function (p) {
-            return p.usage && root.primaryUsage(p.usage) && !p.error;
-        });
-        if (root.barProvider === "opencode") {
-            list = list.filter(function (p) {
-                return p.provider === "opencode-go";
-            });
-        } else if (root.barProvider === "openai") {
-            list = list.filter(function (p) {
-                return p.provider === "codex";
-            });
-        } else if (root.barProvider === "both") {
-            list = list.filter(function (p) {
-                return p.provider === "opencode-go" || p.provider === "codex";
-            });
+    readonly property var barProviders: root.selectBarProviders(root.providers, root.barSources)
+
+    function normalizeBarSources(value) {
+        var allowed = ["opencode-go", "opencode-zen", "codex", "claude"];
+        if (!Array.isArray(value))
+            return ["opencode-go", "opencode-zen", "codex"];
+        return allowed.filter(function (id) { return value.indexOf(id) !== -1; });
+    }
+
+    function legacyBarSources(value) {
+        if (value === "opencode")
+            return ["opencode-go", "opencode-zen"];
+        if (value === "openai")
+            return ["codex"];
+        return ["opencode-go", "opencode-zen", "codex"];
+    }
+
+    function isBarSourceSelected(id) {
+        return ["opencode-go", "opencode-zen", "codex", "claude"].indexOf(id) !== -1 && root.barSources.indexOf(id) !== -1;
+    }
+
+    function toggleBarSource(id) {
+        var allowed = ["opencode-go", "opencode-zen", "codex", "claude"];
+        if (allowed.indexOf(id) === -1 || !root.pluginService || !root.pluginId || typeof root.pluginService.savePluginData !== "function")
+            return false;
+        var next;
+        if (root.isBarSourceSelected(id))
+            next = root.barSources.filter(function (source) { return source !== id; });
+        else
+            next = root.normalizeBarSources(root.barSources.concat([id]));
+        try {
+            return root.pluginService.savePluginData(root.pluginId, "barSources", next) !== false;
+        } catch (error) {
+            return false;
         }
+    }
+
+    function savePluginSetting(key, value) {
+        if (!root.pluginService || !root.pluginId || typeof root.pluginService.savePluginData !== "function")
+            return false;
+        try {
+            return root.pluginService.savePluginData(root.pluginId, key, value) !== false;
+        } catch (error) {
+            return false;
+        }
+    }
+
+    function normalizeBarSourceWindows(value) {
+        var result = ({ "opencode-go": "rolling", "codex": "primary", "opencode-zen": "none", "claude": "fiveHour" });
+        if (!value || typeof value !== "object" || Array.isArray(value)) return result;
+        if (["rolling", "weekly", "monthly"].indexOf(value["opencode-go"]) !== -1) result["opencode-go"] = value["opencode-go"];
+        if (["primary", "secondary"].indexOf(value.codex) !== -1) result.codex = value.codex;
+        if (value["opencode-zen"] === "none") result["opencode-zen"] = "none";
+        if (["fiveHour", "sevenDay", "sonnet", "opus"].indexOf(value.claude) !== -1) result.claude = value.claude;
+        return result;
+    }
+
+    function selectedWindowKey(provider) {
+        return provider === "opencode-go" ? root.barSourceWindows[provider] || "rolling" : provider === "codex" ? root.barSourceWindows[provider] || "primary" : provider === "claude" ? root.barSourceWindows[provider] || "fiveHour" : "none";
+    }
+
+    function availableBarWindows(provider, usage) {
+        var candidates = provider === "opencode-go" ? [["rolling", "Rolling", root.primaryUsage(usage)], ["weekly", "Weekly", root.secondaryUsage(usage)], ["monthly", "Monthly", root.tertiaryUsage(usage)]] : provider === "codex" ? [["primary", "Session", root.primaryUsage(usage)], ["secondary", "Weekly", root.secondaryUsage(usage)]] : provider === "claude" ? [["fiveHour", "5-hour", root.claudeUsageWindow(usage, "fiveHour")], ["sevenDay", "Weekly", root.claudeUsageWindow(usage, "sevenDay")], ["sonnet", "Sonnet", root.claudeUsageWindow(usage, "sonnet")], ["opus", "Opus", root.claudeUsageWindow(usage, "opus")]] : [];
+        return candidates.filter(function (entry) { return root.validUsageWindow(entry[2]); }).map(function (entry) { return { key: entry[0], label: entry[1] }; });
+    }
+
+    function barUsageWindow(provider, usage) {
+        var windows = root.availableBarWindows(provider, usage);
+        if (!windows.length) return null;
+        var key = root.selectedWindowKey(provider);
+        var actual = windows.find(function (entry) { return entry.key === key; }) || windows[0];
+        if (provider === "claude") return root.claudeUsageWindow(usage, actual.key);
+        return actual.key === "rolling" || actual.key === "primary" ? root.primaryUsage(usage) : actual.key === "weekly" || actual.key === "secondary" ? root.secondaryUsage(usage) : root.tertiaryUsage(usage);
+    }
+
+    function barWindowLabel(provider, usage) {
+        var windows = root.availableBarWindows(provider, usage);
+        if (!windows.length) return "";
+        var key = root.selectedWindowKey(provider);
+        return (windows.find(function (entry) { return entry.key === key; }) || windows[0]).label;
+    }
+
+    function setBarSourceWindow(provider, key) {
+        if (provider !== "opencode-go" && provider !== "codex" && provider !== "claude") return false;
+        var item = root.providers.find(function (entry) { return entry.provider === provider; });
+        if (!item || !root.availableBarWindows(provider, item.usage).some(function (entry) { return entry.key === key; })) return false;
+        var next = Object.assign({}, root.barSourceWindows);
+        next[provider] = key;
+        return root.savePluginSetting("barSourceWindows", next);
+    }
+
+    function setLocalStatsEnabled(enabled) {
+        return typeof enabled === "boolean" && root.savePluginSetting("localStatsEnabled", enabled);
+    }
+
+    function setUsageDisplayMode(mode) {
+        return (mode === "used" || mode === "remaining") && root.savePluginSetting("usageDisplayMode", mode);
+    }
+
+    function setNotificationsEnabled(enabled) {
+        return typeof enabled === "boolean" && root.savePluginSetting("notificationsEnabled", enabled);
+    }
+
+    function setZenBalanceThreshold(value) {
+        var parsed = root.validNumber(value);
+        if (typeof value === "boolean" || parsed === null || parsed < 0 || Math.abs(parsed * 100 - Math.round(parsed * 100)) > 1e-8)
+            return false;
+        return root.savePluginSetting("zenBalanceThreshold", Math.round(parsed * 100) / 100);
+    }
+
+    function displayPercent(window) {
+        if (!root.validUsageWindow(window))
+            return 0;
+        var used = Math.max(0, Math.min(100, Number(window.usedPercent)));
+        return root.usageDisplayMode === "remaining" ? 100 - used : used;
+    }
+
+    function selectBarProviders(sourceProviders, selectedSources) {
+        var list = [];
+        var selected = root.normalizeBarSources(selectedSources);
+        selected.forEach(function (id) {
+            var provider = sourceProviders.find(function (p) {
+                return p && p.provider === id && !p.error && (root.barUsageWindow(id, p.usage) || (id === "opencode-zen" && root.hasZenBalance(p.usage)));
+            });
+            if (provider)
+                list.push(provider);
+        });
         return list;
     }
 
     readonly property var barHighestProvider: {
         if (root.barProviders.length === 0)
             return null;
-        var highest = root.barProviders[0];
-        for (var i = 1; i < root.barProviders.length; i++) {
-            if (root.primaryUsage(root.barProviders[i].usage).usedPercent > root.primaryUsage(highest.usage).usedPercent)
-                highest = root.barProviders[i];
+        var quotaProviders = root.barProviders.filter(function (p) { return root.barUsageWindow(p.provider, p.usage); });
+        if (quotaProviders.length === 0)
+            return null;
+        var highest = quotaProviders[0];
+        for (var i = 1; i < quotaProviders.length; i++) {
+            if (root.barUsageWindow(quotaProviders[i].provider, quotaProviders[i].usage).usedPercent > root.barUsageWindow(highest.provider, highest.usage).usedPercent)
+                highest = quotaProviders[i];
         }
         return highest;
     }
 
     readonly property real barHighestPercent: {
-        if (!root.barHighestProvider || !root.barHighestProvider.usage || !root.primaryUsage(root.barHighestProvider.usage))
+        if (!root.barHighestProvider || !root.barHighestProvider.usage || !root.barUsageWindow(root.barHighestProvider.provider, root.barHighestProvider.usage))
             return 0;
-        return root.primaryUsage(root.barHighestProvider.usage).usedPercent;
+        return root.barUsageWindow(root.barHighestProvider.provider, root.barHighestProvider.usage).usedPercent;
     }
 
     // === Helpers ===
+    function findContainingPill(item) {
+        var current = item;
+        while (current) {
+            if ("isMouseHovered" in current && "visualContent" in current && "contentItem" in current)
+                return current;
+            current = current.parent;
+        }
+        return null;
+    }
+
     function getUsageColor(pct) {
         if (pct >= 80)
             return Theme.error;
@@ -114,47 +278,184 @@ PluginComponent {
 
     function formatProviderName(name) {
         if (name === "opencode-go")
-            return "Opencode";
+            return "Opencode Go";
+        if (name === "opencode-zen")
+            return "Opencode Zen";
         if (name === "codex")
-            return "OpenAI";
+            return "Codex";
+        if (name === "claude")
+            return "Claude";
         return capitalizeFirst(name);
     }
 
     function providerLogoPath(provider) {
         var isLight = !!SessionData.isLightMode;
-        if (provider === "opencode" || provider === "opencode-go") {
+        if (provider === "opencode" || provider === "opencode-go" || provider === "opencode-zen") {
             return isLight ? "icons/opencode-go-dark.svg" : "icons/opencode-go-light.svg";
         }
         if (provider === "openai" || provider === "codex") {
             return isLight ? "icons/codex-dark.svg" : "icons/codex-light.svg";
         }
+        if (provider === "claude") return "icons/claude.svg";
         return "";
     }
 
+    function providerTab(provider) {
+        return provider === "codex" || provider === "openai" ? "openai" : provider === "claude" ? "claude" : "opencode";
+    }
+
     function currentProviders() {
-        return activeTab === "openai" ? openaiProviders : opencodeProviders;
+        return activeTab === "openai" ? openaiProviders : activeTab === "claude" ? claudeProviders : opencodeProviders;
     }
 
     function currentError() {
-        return activeTab === "openai" ? openaiError : opencodeError;
+        if (activeTab === "openai")
+            return root.providerError("codex");
+        if (activeTab === "claude")
+            return root.providerError("claude");
+        return [root.providerError("opencode-go"), root.providerError("opencode-zen")].filter(function (s) { return s !== ""; }).join(" · ");
+    }
+
+    function providerError(id) {
+        var category = providerErrors[id] || "";
+        return ({ "missing-cli": "OpenTracker CLI is not installed", "not-configured": "Provider is not configured", "auth-expired": "Sign-in has expired", "rate-limited": "Provider is rate limited", "http-error": "Provider request failed", "timeout": "Provider request timed out", "invalid-output": "Provider returned invalid data", "empty-output": "Provider returned no data", "unknown": "Provider request failed" })[category] || "";
+    }
+
+    function providerHint(id) {
+        var category = root.providerErrors[id] || "";
+        return ({
+            "missing-cli": "Install opentracker-cli and refresh PATH before retrying.",
+            "not-configured": "Sign in to this provider to continue.",
+            "auth-expired": "Sign in again to refresh provider access.",
+            "rate-limited": "Wait a while, then retry.",
+            "http-error": "Check your network connection, then retry.",
+            "timeout": "Retry this provider.",
+            "invalid-output": "Update opentracker, then retry this provider.",
+            "empty-output": "Update opentracker, then retry this provider.",
+            "unknown": "Retry this provider using the command shown in the terminal."
+        })[category] || "Retry this provider using the command shown in the terminal.";
+    }
+
+    function providerRecoveryCommand(id) {
+        var category = root.providerErrors[id] || "";
+        if (["opencode-go", "opencode-zen", "codex", "claude"].indexOf(id) === -1) return "opentracker version";
+        if (category === "missing-cli") return "opentracker version";
+        if (category === "auth-expired" || category === "not-configured") return id === "codex" ? "opentracker login codex" : id === "claude" ? "opentracker login claude" : "opentracker login opencode";
+        return "opentracker fetch " + id + " --force";
+    }
+
+    function classifyProviderFailure(id, stderr, exitCode, started, reason) {
+        if (!started) return "missing-cli";
+        if (reason) return reason.indexOf("Timed out") >= 0 ? "timeout" : "unknown";
+        var text = String(stderr || "").slice(0, 4096).toLowerCase();
+        if (/not configured|not logged in|no credentials/.test(text)) return "not-configured";
+        if (/unauthorized|forbidden|authentication|token expired|login required|\b(?:http\s*)?40[13]\b/.test(text)) return "auth-expired";
+        if (/rate.?limit|too many requests|\b(?:http\s*)?429\b/.test(text)) return "rate-limited";
+        if (/\bhttp\s*[45]\d\d\b|request failed/.test(text)) return "http-error";
+        return exitCode === 0 ? "empty-output" : "unknown";
+    }
+
+    function providerUpdatedAt(id) {
+        return Number(providerTimes[id]) || 0;
+    }
+
+    function providerIsStale(id) {
+        var updated = root.providerUpdatedAt(id);
+        return updated > 0 && root.clockNow - updated >= root.refreshIntervalMs * 2;
+    }
+
+    function providerUpdatedLabel(id) {
+        var updated = root.providerUpdatedAt(id);
+        if (!updated)
+            return "";
+        var ageSeconds = Math.max(0, Math.floor((root.clockNow - updated) / 1000));
+        return ageSeconds < 60 ? ageSeconds + "s ago" : Math.floor(ageSeconds / 60) + "m ago";
+    }
+
+    function providerBalanceText(usage) {
+        if (!usage || typeof usage !== "object")
+            return "";
+        var dollars = root.validNumber(usage.balanceDollars);
+        if (dollars !== null)
+            return "$" + dollars.toFixed(2);
+        var micros = root.validNumber(usage.balanceMicroCents);
+        return micros !== null ? "$" + (micros / 100000000).toFixed(2) : "";
+    }
+
+    function validNumber(value) {
+        if ((typeof value !== "number" && typeof value !== "string") || (typeof value === "string" && value.trim() === ""))
+            return null;
+        var number = Number(value);
+        return isFinite(number) ? number : null;
+    }
+
+    function hasZenBalance(usage) {
+        return !!usage && typeof usage === "object" && (root.validNumber(usage.balanceDollars) !== null || root.validNumber(usage.balanceMicroCents) !== null);
+    }
+
+    function barProviderText(provider) {
+        if (!provider || !provider.usage)
+            return "";
+        var quota = root.barUsageWindow(provider.provider, provider.usage);
+        return quota ? Math.round(root.displayPercent(quota)) + "%" : root.providerBalanceText(provider.usage);
+    }
+
+    function barTooltipText() {
+        return root.barProviders.map(function (provider) {
+            var id = provider.provider;
+            var quota = root.barUsageWindow(id, provider.usage);
+            var details = (quota ? root.barWindowLabel(id, provider.usage) + " (" + root.usageDisplayMode + ")" : "Balance") + " " + root.barProviderText(provider);
+            if (quota && typeof quota.resetsAt === "string") {
+                var reset = root.formatTimeUntil(quota.resetsAt);
+                if (reset)
+                    details += " · resets " + reset;
+            }
+            var error = root.providerError(id);
+            var age = root.providerUpdatedLabel(id);
+            if (error)
+                details += " · " + error;
+            else if (age)
+                details += " · updated " + age;
+            if (root.providerIsStale(id))
+                details += " · stale";
+            return root.formatProviderName(id) + ": " + details;
+        }).join("\n");
+    }
+
+    function validUsageWindow(value) {
+        return !!value && typeof value === "object" && !Array.isArray(value) && root.validNumber(value.usedPercent) !== null;
     }
 
     function primaryUsage(usage) {
-        if (!usage)
+        if (!usage || typeof usage !== "object")
             return null;
-        return usage.rolling || usage.primary || null;
+        var value = usage.rolling || usage.primary || null;
+        return root.validUsageWindow(value) ? value : null;
+    }
+
+    function claudeUsageWindow(usage, key) {
+        if (!usage || typeof usage !== "object") return null;
+        var value = usage[key];
+        return root.validUsageWindow(value) ? value : null;
+    }
+
+    function providerUsageWindows(provider, usage) {
+        var candidates = provider === "opencode-go" ? [["rolling", "Session", root.primaryUsage(usage)], ["weekly", "Weekly", root.secondaryUsage(usage)], ["monthly", "Monthly", root.tertiaryUsage(usage)]] : provider === "codex" ? [["primary", "Session", root.primaryUsage(usage)], ["secondary", "Weekly", root.secondaryUsage(usage)]] : provider === "claude" ? [["fiveHour", "5-hour", root.claudeUsageWindow(usage, "fiveHour")], ["sevenDay", "Weekly", root.claudeUsageWindow(usage, "sevenDay")], ["sonnet", "Sonnet", root.claudeUsageWindow(usage, "sonnet")], ["opus", "Opus", root.claudeUsageWindow(usage, "opus")]] : [];
+        return candidates.filter(function (entry) { return root.validUsageWindow(entry[2]); }).map(function (entry) { return { key: entry[0], label: entry[1], window: entry[2] }; });
     }
 
     function secondaryUsage(usage) {
-        if (!usage)
+        if (!usage || typeof usage !== "object")
             return null;
-        return usage.weekly || usage.secondary || null;
+        var value = usage.weekly || usage.secondary || null;
+        return root.validUsageWindow(value) ? value : null;
     }
 
     function tertiaryUsage(usage) {
-        if (!usage)
+        if (!usage || typeof usage !== "object")
             return null;
-        return usage.monthly || null;
+        var value = usage.monthly || null;
+        return root.validUsageWindow(value) ? value : null;
     }
 
     function primaryLabel(provider) {
@@ -166,54 +467,422 @@ PluginComponent {
     }
 
     function mergeProviders() {
-        root.providers = root.opencodeProviders.concat(root.openaiProviders);
+        root.providers = root.opencodeProviders.concat(root.openaiProviders, root.claudeProviders);
     }
 
     function parseProviderOutput(target, raw) {
+        if (!raw || !raw.trim())
+            throw new Error("Empty output");
         var data = JSON.parse(raw);
         if (!Array.isArray(data))
             data = [data];
-        if (target === "openai") {
-            root.openaiProviders = data;
-            root.openaiError = "";
-        } else {
-            root.opencodeProviders = data;
-            root.opencodeError = "";
+        data = data.filter(function (item) { return item && typeof item === "object" && !Array.isArray(item) && item.provider === target; });
+        if (data.length === 0)
+            throw new Error("No provider data for " + target);
+        for (var i = 0; i < data.length; i++) {
+            var item = data[i];
+            if (item.error)
+                throw new Error("Provider returned an error");
+            if (!item.usage || typeof item.usage !== "object" || Array.isArray(item.usage))
+                throw new Error("Provider usage is missing or invalid");
+            if (target === "opencode-zen") {
+                if (!root.hasZenBalance(item.usage))
+                    throw new Error("Zen balance is missing or invalid");
+            } else if ((target === "claude" ? root.providerUsageWindows(target, item.usage).length : root.availableBarWindows(target, item.usage).length) === 0) {
+                throw new Error("Quota window is missing or invalid");
+            }
         }
+        if (target === "codex") {
+            root.openaiProviders = data;
+        } else if (target === "claude") {
+            root.claudeProviders = data;
+        } else {
+            root.opencodeProviders = root.opencodeProviders.filter(function (item) { return item.provider !== target; }).concat(data).sort(function (a, b) {
+                return (a.provider === "opencode-go" ? 0 : 1) - (b.provider === "opencode-go" ? 0 : 1);
+            });
+        }
+        var times = Object.assign({}, root.providerTimes);
+        times[target] = Date.now();
+        root.providerTimes = times;
+        root.setProviderError(target, "");
+        root.opencodeError = root.providerError("opencode-go") || root.providerError("opencode-zen");
+        root.openaiError = root.providerError("codex");
+        root.claudeError = root.providerError("claude");
         root.mergeProviders();
-        root.hasError = root.opencodeError !== "" || root.openaiError !== "";
+        root.hasError = root.opencodeError !== "" || root.openaiError !== "" || root.claudeError !== "";
         root.errorMessage = root.currentError();
         root.lastUpdated = Qt.formatDateTime(new Date(), "hh:mm:ss");
+        root.evaluateProviderAlerts(target);
     }
 
-    function finishFetch(target, exitCode, raw) {
-        if (root.pendingFetches > 0)
-            root.pendingFetches--;
+    function alertWindows(provider, usage) {
+        var windows = [];
+        if (provider === "claude")
+            return root.providerUsageWindows(provider, usage).map(function (entry) { return { key: provider + ":" + entry.key, label: "Claude " + entry.label, window: entry.window }; });
+        var candidates = provider === "opencode-go" ? [["rolling", root.primaryUsage(usage)], ["weekly", root.secondaryUsage(usage)], ["monthly", root.tertiaryUsage(usage)]] : [["primary", root.primaryUsage(usage)], ["secondary", root.secondaryUsage(usage)]];
+        candidates.forEach(function (entry) {
+            if (root.validUsageWindow(entry[1]))
+                windows.push({ key: provider + ":" + entry[0], label: (provider === "codex" ? "Codex " : "Opencode Go ") + entry[0], window: entry[1] });
+        });
+        return windows;
+    }
+
+    function alertState() {
+        if (!root.pluginService || typeof root.pluginService.loadPluginState !== "function")
+            return { sources: ({}), sourcePrefs: ({}), pending: [] };
+        var state = root.pluginService.loadPluginState(root.pluginId, "alertState", null);
+        if (!state || typeof state !== "object") state = {};
+        else state = JSON.parse(JSON.stringify(state));
+        if (!state.sources || typeof state.sources !== "object") state.sources = ({});
+        if (!state.sourcePrefs || typeof state.sourcePrefs !== "object") state.sourcePrefs = ({});
+        if (!Array.isArray(state.pending)) state.pending = [];
+        return state;
+    }
+
+    function alertPrefs() {
+        return JSON.stringify([root.notificationsEnabled, root.zenBalanceThreshold]);
+    }
+
+    function removeAlertReservation(state, token) {
+        state.pending = (state.pending || []).filter(function (pending) { return pending.token !== token; });
+    }
+
+    function saveAlertState(state) {
+        root.pluginService.savePluginState(root.pluginId, "alertState", state);
+    }
+
+    function baselineAlertSource(state, provider, usage) {
+        var source = { windows: ({}) };
+        if (provider === "opencode-zen") {
+            var dollars = root.validNumber(usage.balanceDollars);
+            source.zen = dollars !== null ? dollars : root.validNumber(usage.balanceMicroCents) / 100000000;
+        } else {
+            root.alertWindows(provider, usage).forEach(function (entry) {
+                var used = Math.max(0, Math.min(100, Number(entry.window.usedPercent)));
+                source.windows[entry.key] = { used: used, resetsAt: entry.window.resetsAt || "", sent80: used >= 80, sent95: used >= 95 };
+            });
+        }
+        state.sources[provider] = source;
+        state.sourcePrefs[provider] = root.alertPrefs();
+    }
+
+    function evaluateProviderAlerts(provider) {
+        if (!root.pluginService || typeof root.pluginService.savePluginState !== "function")
+            return;
+        var state = root.alertState();
+        var prefs = root.alertPrefs();
+        state.pending = state.pending.filter(function (pending) { return Date.now() - pending.time < 180000; });
+        var item;
+        if (provider === "opencode-zen")
+            item = root.opencodeProviders.find(function (entry) { return entry.provider === provider && !entry.error && root.hasZenBalance(entry.usage); });
+        else {
+            var sourceProviders = provider === "codex" ? root.openaiProviders : provider === "claude" ? root.claudeProviders : root.opencodeProviders;
+            item = sourceProviders.find(function (entry) { return entry.provider === provider && !entry.error && root.alertWindows(provider, entry.usage).length > 0; });
+        }
+        if (!item)
+            return;
+        if (!root.notificationsEnabled || state.sourcePrefs[provider] !== prefs) {
+            root.removeAlertReservationForProvider(state, provider);
+            root.baselineAlertSource(state, provider, item.usage);
+            root.saveAlertState(state);
+            return;
+        }
+        if (state.pending.some(function (pending) { return pending.provider === provider; }))
+            return;
+        var priorSource = state.sources[provider] ? JSON.parse(JSON.stringify(state.sources[provider])) : null;
+        var events = [];
+        if (provider === "opencode-zen") {
+            var sourceState = state.sources[provider] || {};
+            var balance = root.validNumber(item.usage.balanceDollars);
+            if (balance === null) balance = root.validNumber(item.usage.balanceMicroCents) / 100000000;
+            if (sourceState.zen !== undefined && sourceState.zen > root.zenBalanceThreshold && balance <= root.zenBalanceThreshold) {
+                events.push({ provider: provider, body: "Balance is $" + balance.toFixed(2) + " (threshold $" + root.zenBalanceThreshold.toFixed(2) + ")" });
+            }
+            sourceState.zen = balance;
+            state.sources[provider] = sourceState;
+        } else {
+            var sourceState = state.sources[provider] || { windows: ({}) };
+            if (!sourceState.windows) sourceState.windows = ({});
+            root.alertWindows(provider, item.usage).forEach(function (entry) {
+                    var used = Math.max(0, Math.min(100, Number(entry.window.usedPercent)));
+                    var old = sourceState.windows[entry.key];
+                    var resetAt = entry.window.resetsAt || "";
+                    var newCycle = !old || (resetAt !== (old.resetsAt || "") && (resetAt || old.resetsAt));
+                    var crossed = [];
+                    if (newCycle) {
+                        old = { used: used, resetsAt: entry.window.resetsAt || "", sent80: used >= 80, sent95: used >= 95 };
+                    } else {
+                        if (!old.sent95 && used >= 95 && old.used < 95) { crossed.push(95); old.sent80 = true; old.sent95 = true; }
+                        else if (!old.sent80 && used >= 80 && old.used < 80) { crossed.push(80); old.sent80 = true; }
+                        if (used < 80) old.sent80 = false;
+                        if (used < 95) old.sent95 = false;
+                        old.used = used;
+                        old.resetsAt = entry.window.resetsAt || "";
+                    }
+                    if (crossed.length) events.push({ provider: provider, key: entry.key, label: entry.label, used: used, resetsAt: entry.window.resetsAt || "", sent80: old.sent80, sent95: old.sent95, thresholds: crossed });
+                    sourceState.windows[entry.key] = old;
+                });
+            state.sources[provider] = sourceState;
+        }
+        if (events.length) {
+            if (root.alertQueue.length >= 3)
+                return;
+            var body = provider === "opencode-zen" ? events[0].body : events.map(function (entry) { return entry.label + " " + entry.used + "% used; threshold " + entry.thresholds.join(" and "); }).join("\n");
+            var desired = JSON.parse(JSON.stringify(state.sources[provider]));
+            if (priorSource) state.sources[provider] = priorSource;
+            else delete state.sources[provider];
+            var pending = { token: String(Date.now()) + ":" + provider + ":" + Math.random(), provider: provider, prefs: prefs, time: Date.now(), body: body, desired: desired };
+            state.pending.push({ token: pending.token, provider: provider, prefs: prefs, time: pending.time });
+            root.saveAlertState(state);
+            root.alertQueue = root.alertQueue.concat([pending]);
+            root.startNextAlert();
+            return;
+        }
+        state.sourcePrefs[provider] = prefs;
+        root.saveAlertState(state);
+    }
+
+    function removeAlertReservationForProvider(state, provider) {
+        state.pending = state.pending.filter(function (pending) { return pending.provider !== provider; });
+    }
+
+    function startNextAlert() {
+        if (root.alertProcessBusy)
+            return;
+        while (root.alertQueue.length > 0) {
+            var candidate = root.alertQueue[0];
+            var candidateState = root.alertState();
+            var reservation = candidateState.pending.find(function (pending) { return pending.token === candidate.token; });
+            if (root.notificationsEnabled && candidate.prefs === root.alertPrefs() && reservation && reservation.prefs === candidate.prefs)
+                break;
+            root.alertQueue = root.alertQueue.slice(1);
+            root.removeAlertReservation(candidateState, candidate.token);
+            root.saveAlertState(candidateState);
+        }
+        if (root.alertQueue.length === 0)
+            return;
+        var next = root.alertQueue[0];
+        root.alertQueue = root.alertQueue.slice(1);
+        root.alertProcessBusy = true;
+        root.alertTimedOut = false;
+        root.alertActiveRecord = next;
+        root.alertOutput = "";
+        alertWatchdog.interval = root.alertTimeoutMs;
+        alertWatchdog.restart();
+        procAlert.command = ["dms", "notify", "-a", "OpenTrackerBar", "-u", "normal", "-i", "monitoring", next.provider === "opencode-zen" ? "Zen balance low" : "Quota alert", next.body];
+        procAlert.running = true;
+    }
+
+    function finishAlert(exitCode, timedOut) {
+        if (!root.alertProcessBusy) return;
+        alertWatchdog.stop();
+        var record = root.alertActiveRecord;
+        if (record) {
+            var state = root.alertState();
+            var reservation = state.pending.find(function (pending) { return pending.token === record.token; });
+            var currentPrefs = root.alertPrefs();
+            var current = root.notificationsEnabled && record.prefs === currentPrefs && reservation && reservation.prefs === record.prefs;
+            if (exitCode === 0 && !timedOut && !root.alertTimedOut && current) {
+                state.sources[record.provider] = record.desired;
+                state.sourcePrefs[record.provider] = record.prefs;
+            } else if (exitCode !== 0 || timedOut || root.alertTimedOut) {
+                console.warn("opentracker: alert sender failed for " + record.provider + " (exit " + exitCode + (timedOut || root.alertTimedOut ? ", timeout" : "") + ")");
+            }
+            root.removeAlertReservation(state, record.token);
+            root.saveAlertState(state);
+        }
+        root.alertActiveRecord = null;
+        root.alertProcessBusy = false;
+        root.alertTimedOut = false;
+        root.startNextAlert();
+    }
+
+    function setProviderError(target, message) {
+        var errors = Object.assign({}, root.providerErrors);
+        errors[target] = message;
+        root.providerErrors = errors;
+    }
+
+    function finishFetch(target, exitCode, raw, reason) {
+        if (!root.fetchActive[target])
+            return;
+        reason = reason || root.fetchTimeouts[target] || "";
+        var timeouts = Object.assign({}, root.fetchTimeouts);
+        timeouts[target] = "";
+        root.fetchTimeouts = timeouts;
+        var fetchWasStarted = root.fetchStarted[target] === true;
+        var active = Object.assign({}, root.fetchActive);
+        active[target] = false;
+        root.fetchActive = active;
+        root.pendingFetches = Math.max(0, root.pendingFetches - 1);
         root.isLoading = root.pendingFetches > 0;
 
-        if (exitCode === 0 && raw.length > 0) {
+        if (exitCode === 0 && raw && raw.trim().length > 0 && !reason) {
             try {
                 root.parseProviderOutput(target, raw);
             } catch (e) {
-                console.warn("opentracker: JSON parse error:", e);
-                if (target === "openai")
-                    root.openaiError = "Failed to parse OpenAI output";
-                else
-                    root.opencodeError = "Failed to parse Opencode output";
+                root.setProviderError(target, "invalid-output");
             }
-        } else if (exitCode !== 0) {
-            if (target === "openai")
-                root.openaiError = "OpenAI fetch exited with code " + exitCode;
-            else
-                root.opencodeError = "Opencode fetch exited with code " + exitCode;
+        } else {
+            var category = root.classifyProviderFailure(target, root.fetchStderr[target], exitCode, fetchWasStarted, reason);
+            if (exitCode === 0 && (!raw || !raw.trim())) category = "empty-output";
+            root.setProviderError(target, category);
         }
+        var started = Object.assign({}, root.fetchStarted); started[target] = false; root.fetchStarted = started;
+        var stderr = Object.assign({}, root.fetchStderr); stderr[target] = ""; root.fetchStderr = stderr;
 
-        root.hasError = root.opencodeError !== "" || root.openaiError !== "";
+        root.opencodeError = root.providerError("opencode-go") || root.providerError("opencode-zen");
+        root.openaiError = root.providerError("codex");
+        root.claudeError = root.providerError("claude");
+        root.hasError = root.opencodeError !== "" || root.openaiError !== "" || root.claudeError !== "";
         root.errorMessage = root.currentError();
     }
 
+    function timeoutFetch(target, process) {
+        if (!root.fetchActive[target])
+            return;
+        var processId = Number(process.processId);
+        var hasProcess = isFinite(processId) && processId > 0;
+        if (hasProcess) root.markFetchStarted(target);
+        var timeouts = Object.assign({}, root.fetchTimeouts);
+        timeouts[target] = "Timed out after 30 seconds";
+        root.fetchTimeouts = timeouts;
+        var awaiting = Object.assign({}, root.fetchAwaitingExit);
+        awaiting[target] = hasProcess;
+        root.fetchAwaitingExit = awaiting;
+        if (hasProcess)
+            process.signal(9);
+        else
+            process.running = false;
+        root.finishFetch(target, -1, "", timeouts[target]);
+    }
+
+    function startFetch(target, process, force) {
+        if (process.running || root.fetchActive[target] || root.fetchAwaitingExit[target])
+            return;
+        var active = Object.assign({}, root.fetchActive);
+        active[target] = true;
+        root.fetchActive = active;
+        var timeouts = Object.assign({}, root.fetchTimeouts);
+        timeouts[target] = "";
+        root.fetchTimeouts = timeouts;
+        var started = Object.assign({}, root.fetchStarted); started[target] = false; root.fetchStarted = started;
+        var stderr = Object.assign({}, root.fetchStderr); stderr[target] = ""; root.fetchStderr = stderr;
+        root.pendingFetches++;
+        root.isLoading = true;
+        if (target === "opencode-go") root.opencodeJsonBuffer = "";
+        else if (target === "opencode-zen") root.opencodeZenJsonBuffer = "";
+        else if (target === "codex") root.openaiJsonBuffer = "";
+        else root.claudeJsonBuffer = "";
+        process.command = ["opentracker", "fetch", target].concat(force ? ["--force"] : []);
+        process.running = true;
+        if (target === "opencode-go") watchdogGo.restart();
+        else if (target === "opencode-zen") watchdogZen.restart();
+        else if (target === "codex") watchdogCodex.restart();
+        else watchdogClaude.restart();
+    }
+
+    function markFetchStarted(target) {
+        var started = Object.assign({}, root.fetchStarted); started[target] = true; root.fetchStarted = started;
+    }
+
+    function appendFetchStderr(target, text) {
+        var stderr = Object.assign({}, root.fetchStderr);
+        stderr[target] = String(String(stderr[target] || "") + String(text || "")).slice(-4096);
+        root.fetchStderr = stderr;
+    }
+
+    function refreshProvider(provider, force) {
+        if (provider === "opencode-go") root.startFetch(provider, procOpencode, force === true);
+        else if (provider === "opencode-zen") root.startFetch(provider, procOpencodeZen, force === true);
+        else if (provider === "codex") root.startFetch(provider, procOpenai, force === true);
+        else if (provider === "claude") root.startFetch(provider, procClaude, force === true);
+        else return false;
+        return true;
+    }
+
+    function localDayBounds(now) {
+        var date = new Date(now);
+        var from = new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime();
+        return { from: from, to: new Date(date.getFullYear(), date.getMonth(), date.getDate() + 1).getTime() };
+    }
+
+    function parseLocalStats(raw, now) {
+        if (!raw || raw.length > 32768) return null;
+        var value;
+        try { value = JSON.parse(raw); } catch (error) { return null; }
+        if (!value || value.source !== "opencode-local" || value.period !== "today" || !Number.isSafeInteger(value.totalTokens) || value.totalTokens < 0 || !Number.isSafeInteger(value.sessions) || value.sessions < 0 || !value.range || !Number.isSafeInteger(value.range.from) || !Number.isSafeInteger(value.range.to)) return null;
+        var bounds = root.localDayBounds(now);
+        var dayStart = bounds.from;
+        var tolerance = 60000;
+        if (value.range.from < bounds.from || value.range.from >= bounds.to || value.range.to < value.range.from || value.range.to > now + tolerance || value.range.to >= bounds.to) return null;
+        if (typeof value.updatedAt !== "string" || !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?Z$/.test(value.updatedAt) || !Number.isFinite(Date.parse(value.updatedAt)) || Date.parse(value.updatedAt) < dayStart || Date.parse(value.updatedAt) >= bounds.to || Date.parse(value.updatedAt) > now + tolerance) return null;
+        return { source: value.source, period: value.period, totalTokens: value.totalTokens, sessions: value.sessions, updatedAt: value.updatedAt, range: { from: value.range.from, to: value.range.to } };
+    }
+
+    function ensureLocalStats() {
+        if (!root.localStatsEnabled || !root.interactionActive || root.activeTab !== "opencode") return false;
+        root.invalidateLocalStatsForDay();
+        if (root.localStatsLoading || (root.localStatsUpdatedAt > 0 && Date.now() - root.localStatsUpdatedAt < 300000)) return false;
+        return root.refreshLocalStats(false);
+    }
+
+    function invalidateLocalStatsForDay() {
+        if (!root.localStats) return false;
+        var bounds = root.localDayBounds(root.clockNow);
+        if (root.localStats.range && root.localStats.range.from >= bounds.from && root.localStats.range.from < bounds.to) return false;
+        root.localStats = null;
+        root.localStatsUpdatedAt = 0;
+        return true;
+    }
+
+    function refreshLocalStats(force) {
+        if (!root.localStatsEnabled || !root.interactionActive || root.activeTab !== "opencode" || root.localStatsLoading || root.localStatsAwaitingExit) return false;
+        root.localStatsLoading = true;
+        root.localStatsError = "";
+        root.localStatsBuffer = "";
+        root.localStatsStderr = "";
+        root.localStatsStarted = false;
+        procLocalStats.command = ["opentracker", "stats", "opencode"].concat(force === true ? ["--force"] : []);
+        procLocalStats.running = true;
+        localStatsWatchdog.restart();
+        return true;
+    }
+
+    function finishLocalStats(exitCode, timedOut) {
+        if (!root.localStatsLoading) return;
+        localStatsWatchdog.stop();
+        root.localStatsLoading = false;
+        var parsed = exitCode === 0 && !timedOut ? root.parseLocalStats(root.localStatsBuffer, Date.now()) : null;
+        if (parsed) {
+            root.localStats = parsed;
+            root.localStatsUpdatedAt = Date.parse(parsed.updatedAt);
+            root.localStatsError = "";
+        } else {
+            root.localStatsError = exitCode !== 0 && root.localStatsNeedsUpgrade(root.localStatsStderr, root.localStatsStarted) ? "Update opentracker and OpenCode to enable local statistics" : timedOut ? "Local statistics request timed out" : "Local statistics are unavailable";
+        }
+        root.localStatsBuffer = "";
+        root.localStatsStderr = "";
+    }
+
+    function localStatsNeedsUpgrade(stderr, started) {
+        if (!started) return true;
+        var text = String(stderr || "").slice(0, 4096).toLowerCase();
+        return /unknown\s+command[^\n]*\bstats\b|(?:unsupported|unrecognized|unknown (?:option|flag))[^\n]*(?:--standalone|--json)|(?:--standalone|--json)[^\n]*(?:unsupported|unrecognized|unknown)/.test(text);
+    }
+
+    function timeoutLocalStats() {
+        if (!root.localStatsLoading) return;
+        var pid = Number(procLocalStats.processId);
+        if (isFinite(pid) && pid > 0) root.localStatsStarted = true;
+        root.localStatsAwaitingExit = isFinite(pid) && pid > 0;
+        if (root.localStatsAwaitingExit) procLocalStats.signal(9);
+        else procLocalStats.running = false;
+        root.finishLocalStats(-1, true);
+    }
+
     function formatTimeUntil(iso) {
-        if (!iso)
+        if (typeof iso !== "string" || !iso)
             return "";
         var parts = iso.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?Z$/);
         var targetMs;
@@ -231,7 +900,7 @@ PluginComponent {
                 return "";
             targetMs = d.getTime();
         }
-        var diff = targetMs - Date.now();
+        var diff = targetMs - root.clockNow;
         if (diff <= 0)
             return "now";
         var mins = Math.floor(diff / 60000);
@@ -254,12 +923,34 @@ PluginComponent {
                 root.opencodeJsonBuffer += data;
             }
         }
-        stderr: SplitParser {
-            onRead: line => console.warn("opentracker opencode stderr:", line)
-        }
+        stderr: SplitParser { onRead: line => root.appendFetchStderr("opencode-go", line) }
+        onStarted: root.markFetchStarted("opencode-go")
         onExited: exitCode => {
-            root.finishFetch("opencode", exitCode, root.opencodeJsonBuffer);
+            var awaiting = Object.assign({}, root.fetchAwaitingExit);
+            awaiting["opencode-go"] = false;
+            root.fetchAwaitingExit = awaiting;
+            root.finishFetch("opencode-go", exitCode, root.opencodeJsonBuffer);
             root.opencodeJsonBuffer = "";
+            watchdogGo.stop();
+        }
+    }
+
+    Process {
+        id: procOpencodeZen
+        command: ["opentracker", "fetch", "opencode-zen"]
+        stdout: SplitParser {
+            splitMarker: ""
+            onRead: data => { root.opencodeZenJsonBuffer += data; }
+        }
+        stderr: SplitParser { onRead: line => root.appendFetchStderr("opencode-zen", line) }
+        onStarted: root.markFetchStarted("opencode-zen")
+        onExited: exitCode => {
+            var awaiting = Object.assign({}, root.fetchAwaitingExit);
+            awaiting["opencode-zen"] = false;
+            root.fetchAwaitingExit = awaiting;
+            root.finishFetch("opencode-zen", exitCode, root.opencodeZenJsonBuffer);
+            root.opencodeZenJsonBuffer = "";
+            watchdogZen.stop();
         }
     }
 
@@ -272,31 +963,44 @@ PluginComponent {
                 root.openaiJsonBuffer += data;
             }
         }
-        stderr: SplitParser {
-            onRead: line => console.warn("opentracker openai stderr:", line)
-        }
+        stderr: SplitParser { onRead: line => root.appendFetchStderr("codex", line) }
+        onStarted: root.markFetchStarted("codex")
         onExited: exitCode => {
-            root.finishFetch("openai", exitCode, root.openaiJsonBuffer);
+            var awaiting = Object.assign({}, root.fetchAwaitingExit);
+            awaiting.codex = false;
+            root.fetchAwaitingExit = awaiting;
+            root.finishFetch("codex", exitCode, root.openaiJsonBuffer);
             root.openaiJsonBuffer = "";
+            watchdogCodex.stop();
         }
     }
 
-    function refresh(force) {
-        if (procOpencode.running || procOpenai.running)
-            return;
-        root.isLoading = true;
-        root.pendingFetches = 2;
-        root.opencodeJsonBuffer = "";
-        root.openaiJsonBuffer = "";
-        if (force) {
-            procOpencode.command = ["opentracker", "fetch", "opencode-go", "--force"];
-            procOpenai.command = ["opentracker", "fetch", "codex", "--force"];
-        } else {
-            procOpencode.command = ["opentracker", "fetch", "opencode-go"];
-            procOpenai.command = ["opentracker", "fetch", "codex"];
+    Process {
+        id: procClaude
+        command: ["opentracker", "fetch", "claude"]
+        stdout: SplitParser { splitMarker: ""; onRead: data => { root.claudeJsonBuffer += data; } }
+        stderr: SplitParser { onRead: line => root.appendFetchStderr("claude", line) }
+        onStarted: root.markFetchStarted("claude")
+        onExited: exitCode => {
+            var awaiting = Object.assign({}, root.fetchAwaitingExit);
+            awaiting.claude = false;
+            root.fetchAwaitingExit = awaiting;
+            root.finishFetch("claude", exitCode, root.claudeJsonBuffer);
+            root.claudeJsonBuffer = "";
+            watchdogClaude.stop();
         }
-        procOpencode.running = true;
-        procOpenai.running = true;
+    }
+
+    Timer { id: watchdogGo; interval: root.fetchTimeoutMs; repeat: false; onTriggered: root.timeoutFetch("opencode-go", procOpencode) }
+    Timer { id: watchdogZen; interval: root.fetchTimeoutMs; repeat: false; onTriggered: root.timeoutFetch("opencode-zen", procOpencodeZen) }
+    Timer { id: watchdogCodex; interval: root.fetchTimeoutMs; repeat: false; onTriggered: root.timeoutFetch("codex", procOpenai) }
+    Timer { id: watchdogClaude; interval: root.fetchTimeoutMs; repeat: false; onTriggered: root.timeoutFetch("claude", procClaude) }
+
+    function refresh(force) {
+        root.startFetch("opencode-go", procOpencode, force);
+        root.startFetch("opencode-zen", procOpencodeZen, force);
+        root.startFetch("codex", procOpenai, force);
+        root.startFetch("claude", procClaude, force);
     }
 
     Timer {
@@ -306,84 +1010,233 @@ PluginComponent {
         onTriggered: root.refresh(false)
     }
 
+    Timer {
+        interval: 30000
+        running: true
+        repeat: true
+        onTriggered: root.clockNow = Date.now()
+    }
+
+    Process {
+        id: procAlert
+        stdout: SplitParser { onRead: data => { root.alertOutput += data; } }
+        onExited: exitCode => root.finishAlert(exitCode, false)
+    }
+    Process {
+        id: procLocalStats
+        stdout: SplitParser { splitMarker: ""; onRead: data => { root.localStatsBuffer = (root.localStatsBuffer + data).slice(0, 32769); } }
+        stderr: SplitParser { onRead: data => { root.localStatsStderr = (root.localStatsStderr + String(data || "")).slice(-4096); } }
+        onStarted: root.localStatsStarted = true
+        onExited: exitCode => {
+            root.localStatsAwaitingExit = false;
+            root.finishLocalStats(exitCode, false);
+        }
+    }
+    Timer { id: localStatsWatchdog; interval: root.localStatsTimeoutMs; repeat: false; onTriggered: root.timeoutLocalStats() }
+    Connections {
+        target: root
+        function onInteractionActiveChanged() { root.ensureLocalStats(); }
+        function onActiveTabChanged() { root.ensureLocalStats(); }
+        function onLocalStatsEnabledChanged() { root.ensureLocalStats(); }
+    }
+    Timer {
+        id: alertWatchdog
+        interval: root.alertTimeoutMs
+        repeat: false
+        onTriggered: {
+            var pid = Number(procAlert.processId);
+            if (isFinite(pid) && pid > 0) {
+                root.alertTimedOut = true;
+                procAlert.signal(9);
+                alertWatchdog.interval = 3000;
+                alertWatchdog.restart();
+            } else {
+                procAlert.running = false;
+                root.finishAlert(-1, true);
+            }
+        }
+    }
+
     Component.onCompleted: {
         root.refresh(false);
     }
 
     // === Bar pill (horizontal) ===
     horizontalBarPill: Component {
-        Row {
-            spacing: Theme.spacingXS
+        Item {
+            id: horizontalPillWrapper
+            readonly property var containingPill: root.findContainingPill(horizontalPillWrapper)
+            readonly property bool pillHovered: containingPill ? containingPill.isMouseHovered : false
+            implicitWidth: horizontalPillContent.implicitWidth
+            implicitHeight: horizontalPillContent.implicitHeight
+            width: implicitWidth
+            height: implicitHeight
+            onPillHoveredChanged: pillHovered ? horizontalBarTooltipHost.schedule() : horizontalBarTooltipHost.dismiss()
+            Component.onCompleted: {
+                if (horizontalPillWrapper.pillHovered)
+                    horizontalBarTooltipHost.schedule();
+            }
 
-            Repeater {
-                model: root.barProviders
+            Row {
+                id: horizontalPillContent
+                spacing: Theme.spacingXS
 
-                Row {
-                    spacing: 6
+                Repeater {
+                    model: root.barProviders
+
+                    Row {
+                        id: barProviderDelegate
+                        required property var modelData
+                        required property int index
+                        spacing: Theme.spacingS
+                        anchors.verticalCenter: parent.verticalCenter
+
+                        Rectangle {
+                            visible: barProviderDelegate.index > 0
+                            width: 1
+                            height: Theme.iconSizeSmall
+                            radius: Theme.spacingXXS
+                            color: Theme.outline
+                            opacity: 0.45
+                            anchors.verticalCenter: parent.verticalCenter
+                        }
+
+                        Image {
+                            id: barProviderLogo
+                            width: Theme.iconSizeSmall
+                            height: Theme.iconSizeSmall
+                            source: root.providerLogoPath(barProviderDelegate.modelData.provider)
+                            sourceSize.width: Theme.iconSizeSmall
+                            sourceSize.height: Theme.iconSizeSmall
+                            fillMode: Image.PreserveAspectFit
+                            layer.enabled: true
+                            layer.effect: MultiEffect {
+                                colorization: 1
+                                colorizationColor: Theme.surfaceText
+                            }
+                            anchors.verticalCenter: parent.verticalCenter
+                        }
+
+                        StyledText {
+                            text: barProviderDelegate.modelData.provider === "opencode-zen" ? "Zen" : barProviderDelegate.modelData.provider === "opencode-go" ? "Go" : root.formatProviderName(barProviderDelegate.modelData.provider)
+                            font.pixelSize: Theme.fontSizeSmall
+                            font.weight: Font.Medium
+                            color: Theme.surfaceText
+                            anchors.verticalCenter: parent.verticalCenter
+                        }
+
+                        StyledText {
+                            text: root.barProviderText(barProviderDelegate.modelData)
+                            font.pixelSize: Theme.fontSizeSmall
+                            font.weight: Font.Medium
+                                    color: root.barUsageWindow(barProviderDelegate.modelData.provider, barProviderDelegate.modelData.usage) ? root.getUsageColor(root.barUsageWindow(barProviderDelegate.modelData.provider, barProviderDelegate.modelData.usage).usedPercent) : Theme.surfaceText
+                            anchors.verticalCenter: parent.verticalCenter
+                        }
+                    }
+                }
+
+                StyledText {
+                    visible: root.barSources.length > 0 && root.barProviders.length === 0
+                    text: {
+                        if (root.isLoading && root.providers.length === 0)
+                            return "...";
+                        if (root.hasError && root.providers.length === 0)
+                            return "ERR";
+                        return "";
+                    }
+                    font.pixelSize: Theme.fontSizeSmall
+                    font.weight: Font.Medium
+                    color: Theme.surfaceText
                     anchors.verticalCenter: parent.verticalCenter
+                }
 
-                    Rectangle {
-                        visible: index > 0
-                        width: 1
-                        height: 14
-                        radius: 1
-                        color: Theme.outline
-                        opacity: 0.45
-                        anchors.verticalCenter: parent.verticalCenter
-                    }
-
-                    Image {
-                        width: 14
-                        height: 14
-                        source: root.providerLogoPath(modelData.provider)
-                        sourceSize.width: 14
-                        sourceSize.height: 14
-                        fillMode: Image.PreserveAspectFit
-                        anchors.verticalCenter: parent.verticalCenter
-                    }
-
-                    StyledText {
-                        text: root.formatProviderName(modelData.provider) + " " + Math.round(root.primaryUsage(modelData.usage).usedPercent) + "%"
-                        font.pixelSize: Theme.fontSizeSmall
-                        font.weight: Font.Medium
-                        color: root.getUsageColor(root.primaryUsage(modelData.usage).usedPercent)
-                        anchors.verticalCenter: parent.verticalCenter
-                    }
+                DankIcon {
+                    visible: root.barSources.length === 0 || root.barProviders.length === 0 && !root.isLoading && !(root.hasError && root.providers.length === 0)
+                    name: "monitoring"
+                    size: Theme.iconSizeSmall
+                    color: Theme.surfaceVariantText
+                    anchors.verticalCenter: parent.verticalCenter
                 }
             }
 
-            StyledText {
-                visible: root.barProviders.length === 0
-                text: {
-                    if (root.isLoading && root.providers.length === 0)
-                        return "...";
-                    if (root.hasError && root.providers.length === 0)
-                        return "ERR";
-                    return "N/A";
+            DCommonWidgets.DTooltipHost {
+                id: horizontalBarTooltipHost
+                anchors.fill: parent
+                target: horizontalPillWrapper
+                text: root.barSources.length === 0 ? "Pin a provider card to show it in the bar" : root.barTooltipText()
+                multiline: true
+                enabled: !root.interactionActive
+                onEnabledChanged: {
+                    if (!enabled)
+                        dismiss();
+                    else if (horizontalPillWrapper.pillHovered)
+                        schedule();
                 }
-                font.pixelSize: Theme.fontSizeSmall
-                font.weight: Font.Medium
-                color: root.getUsageColor(root.barHighestPercent)
-                anchors.verticalCenter: parent.verticalCenter
+                z: 2
             }
         }
     }
 
     // === Bar pill (vertical) ===
     verticalBarPill: Component {
-        Column {
-            spacing: Theme.spacingXS
+        Item {
+            id: verticalPillWrapper
+            readonly property var containingPill: root.findContainingPill(verticalPillWrapper)
+            readonly property bool pillHovered: containingPill ? containingPill.isMouseHovered : false
+            implicitWidth: verticalPillContent.implicitWidth
+            implicitHeight: verticalPillContent.implicitHeight
+            width: implicitWidth
+            height: implicitHeight
+            onPillHoveredChanged: pillHovered ? verticalBarTooltipHost.schedule() : verticalBarTooltipHost.dismiss()
+            Component.onCompleted: {
+                if (verticalPillWrapper.pillHovered)
+                    verticalBarTooltipHost.schedule();
+            }
 
-            StyledText {
-                text: {
-                    if (!root.barHighestProvider)
-                        return "--";
-                    return Math.round(root.barHighestPercent) + "%";
+            Column {
+                id: verticalPillContent
+                spacing: Theme.spacingXS
+
+                StyledText {
+                    visible: root.barSources.length > 0
+                    text: {
+                        var provider = root.barHighestProvider;
+                        if (!provider)
+                            provider = root.barProviders.find(function (p) { return p && p.provider === "opencode-zen" && p.usage; }) || null;
+                        if (!provider)
+                            return "--";
+                        return root.barProviderText(provider);
+                    }
+                    font.pixelSize: Theme.fontSizeSmall
+                    font.weight: Font.Medium
+                    color: root.barHighestProvider && root.barUsageWindow(root.barHighestProvider.provider, root.barHighestProvider.usage) ? root.getUsageColor(root.barUsageWindow(root.barHighestProvider.provider, root.barHighestProvider.usage).usedPercent) : Theme.surfaceText
+                    anchors.horizontalCenter: parent.horizontalCenter
                 }
-                font.pixelSize: Theme.fontSizeSmall
-                font.weight: Font.Medium
-                color: root.getUsageColor(root.barHighestPercent)
-                anchors.horizontalCenter: parent.horizontalCenter
+
+                DankIcon {
+                    visible: root.barSources.length === 0
+                    name: "monitoring"
+                    size: Theme.iconSizeSmall
+                    color: Theme.surfaceVariantText
+                    anchors.horizontalCenter: parent.horizontalCenter
+                }
+            }
+
+            DCommonWidgets.DTooltipHost {
+                id: verticalBarTooltipHost
+                anchors.fill: parent
+                target: verticalPillWrapper
+                text: root.barSources.length === 0 ? "Pin a provider card to show it in the bar" : root.barTooltipText()
+                multiline: true
+                side: root.axis?.edge === "left" ? "right" : "left"
+                enabled: !root.interactionActive
+                onEnabledChanged: {
+                    if (!enabled)
+                        dismiss();
+                    else if (verticalPillWrapper.pillHovered)
+                        schedule();
+                }
+                z: 2
             }
         }
     }
@@ -395,46 +1248,73 @@ PluginComponent {
     popoutContent: Component {
         PopoutComponent {
             id: popup
-            headerText: "OpenTracker"
-            detailsText: root.lastUpdated ? ("Updated " + root.lastUpdated) : ""
+            headerText: ""
+            detailsText: ""
             showCloseButton: true
-
-            headerActions: Component {
-                Row {
-                    spacing: Theme.spacingXS
-
-                    Rectangle {
-                        width: 28
-                        height: 28
-                        radius: 14
-                        color: refreshTap.pressed ? Theme.surfaceContainerHighest : refreshArea.containsMouse ? Theme.surfaceContainerHighest : "transparent"
-
-                        DankIcon {
-                            anchors.centerIn: parent
-                            name: "refresh"
-                            size: 16
-                            color: Theme.surfaceText
-                        }
-
-                        MouseArea {
-                            id: refreshArea
-                            anchors.fill: parent
-                            hoverEnabled: true
-                            cursorShape: Qt.PointingHandCursor
-
-                            TapHandler {
-                                id: refreshTap
-                                onTapped: root.refresh(true)
-                            }
-                        }
-                    }
-                }
-            }
 
             Item {
                 id: contentWrapper
                 width: parent.width
                 implicitHeight: mainCol.implicitHeight
+                property bool preferencesExpanded: false
+                property string zenThresholdDraft: "1.00"
+                property bool zenThresholdInvalid: false
+                property string copiedProvider: ""
+
+                function windowOptions(provider, usage) {
+                    return root.availableBarWindows(provider, usage);
+                }
+
+                function compactTokens(value) {
+                    var n = Number(value);
+                    if (!isFinite(n) || n < 0)
+                        return "";
+                    if (n >= 1000000)
+                        return (n / 1000000).toFixed(n >= 10000000 ? 0 : 1).replace(/\.0$/, "") + "M";
+                    if (n >= 1000)
+                        return (n / 1000).toFixed(n >= 100000 ? 0 : 1).replace(/\.0$/, "") + "K";
+                    return String(Math.round(n));
+                }
+
+                function copyRecovery(provider) {
+                    var command = root.providerRecoveryCommand(provider);
+                    if (!command || typeof DMSService === "undefined")
+                        return;
+                    DMSService.sendRequest("clipboard.copy", { "text": command }, function (response) {
+                        if (!response || response.error || response.result === false || response.success === false
+                            || (response.result && typeof response.result === "object" && response.result.success === false))
+                            return;
+                        contentWrapper.copiedProvider = provider;
+                        copiedStatusTimer.restart();
+                    });
+                }
+
+                function commitZenThreshold() {
+                    var draft = zenThresholdDraft.trim();
+                    if (!/^(?:0|[1-9][0-9]*)(?:\.[0-9]{1,2})?$/.test(draft)) {
+                        zenThresholdInvalid = true;
+                        return;
+                    }
+                    var value = Number(draft);
+                    if (!isFinite(value) || value < 0) {
+                        zenThresholdInvalid = true;
+                        return;
+                    }
+                    if (value !== Number(root.zenBalanceThreshold) && root.setZenBalanceThreshold(value) !== true) {
+                        zenThresholdInvalid = true;
+                        return;
+                    }
+                    zenThresholdInvalid = false;
+                    zenThresholdDraft = value.toFixed(2);
+                }
+                Component.onCompleted: zenThresholdDraft = Number(root.zenBalanceThreshold).toFixed(2)
+
+                Timer {
+                    id: copiedStatusTimer
+                    interval: 1800
+                    repeat: false
+                    onTriggered: contentWrapper.copiedProvider = ""
+                }
 
                 Column {
                     id: mainCol
@@ -445,58 +1325,220 @@ PluginComponent {
                         width: parent.width
                         spacing: Theme.spacingXS
 
+                        StyledRect {
+                            width: parent.width - refreshButton.width - preferencesButton.width - parent.spacing * 2
+                            height: Theme.buttonHeightXS
+                            radius: Theme.cornerRadius
+                            color: Theme.surfaceContainerHigh
+
+                            StyledText {
+                                anchors.left: parent.left
+                                anchors.leftMargin: Theme.spacingS
+                                anchors.verticalCenter: parent.verticalCenter
+                                text: "OpenTracker"
+                                font.pixelSize: Theme.fontSizeMedium
+                                font.weight: Font.Medium
+                                color: Theme.surfaceText
+                            }
+                        }
+
+                        DankActionButton {
+                            id: refreshButton
+                            iconName: root.isLoading ? "progress_activity" : "refresh"
+                            iconSize: Theme.iconSizeSmall
+                            buttonSize: Theme.buttonHeightXS
+                            iconColor: Theme.surfaceText
+                            backgroundColor: Theme.surfaceContainerHigh
+                            tooltipText: root.isLoading ? "Refreshing…" : "Refresh usage"
+                            enabled: !root.isLoading
+                            RotationAnimation on rotation {
+                                from: 0
+                                to: 360
+                                duration: 900
+                                loops: Animation.Infinite
+                                running: root.isLoading
+                                onRunningChanged: if (!running) refreshButton.rotation = 0
+                            }
+                            onClicked: root.refresh(true)
+                        }
+
+                        DankActionButton {
+                            id: preferencesButton
+                            iconName: "tune"
+                            iconSize: Theme.iconSizeSmall
+                            buttonSize: Theme.buttonHeightXS
+                            iconColor: contentWrapper.preferencesExpanded ? Theme.primary : Theme.surfaceText
+                            backgroundColor: Theme.surfaceContainerHigh
+                            tooltipText: contentWrapper.preferencesExpanded ? "Hide preferences" : "Show preferences"
+                            Accessible.name: tooltipText
+                            onClicked: contentWrapper.preferencesExpanded = !contentWrapper.preferencesExpanded
+                        }
+                    }
+
+                    StyledRect {
+                        width: parent.width
+                        visible: contentWrapper.preferencesExpanded
+                        implicitHeight: visible ? preferencesColumn.implicitHeight + Theme.spacingM * 2 : 0
+                        height: implicitHeight
+                        radius: Theme.cornerRadius
+                        color: Theme.surfaceContainerHigh
+
+                        Column {
+                            id: preferencesColumn
+                            anchors.left: parent.left
+                            anchors.right: parent.right
+                            anchors.top: parent.top
+                            anchors.margins: Theme.spacingM
+                            spacing: Theme.spacingS
+
+                            StyledText {
+                                text: "Preferences"
+                                font.pixelSize: Theme.fontSizeMedium
+                                font.weight: Font.Medium
+                                color: Theme.surfaceText
+                            }
+
+                            Column {
+                                width: parent.width
+                                spacing: Theme.spacingXS
+                                StyledText {
+                                    text: "Usage display"
+                                    font.pixelSize: Theme.fontSizeSmall
+                                    font.weight: Font.Medium
+                                    color: Theme.surfaceText
+                                }
+                                DCommonWidgets.DFilterChips {
+                                    width: parent.width
+                                    model: ["Used", "Remaining"]
+                                    currentIndex: root.usageDisplayMode === "remaining" ? 1 : 0
+                                    showCheck: false
+                                    showCounts: false
+                                    chipHeight: Theme.buttonHeightXS
+                                    chipPadding: Theme.spacingM
+                                    onSelectionChanged: index => root.setUsageDisplayMode(index === 1 ? "remaining" : "used")
+                                }
+                            }
+
+                            DCommonWidgets.DToggle {
+                                width: parent.width
+                                checked: root.notificationsEnabled
+                                text: "Notifications"
+                                description: "Alerts at 80% and 95% usage"
+                                descriptionColor: Theme.surfaceVariantText
+                                Accessible.name: "Usage notifications"
+                                onToggled: value => root.setNotificationsEnabled(value)
+                            }
+
+                            DCommonWidgets.DToggle {
+                                width: parent.width
+                                checked: root.localStatsEnabled
+                                text: "Local OpenCode stats"
+                                description: "Show today's token and session totals"
+                                descriptionColor: Theme.surfaceVariantText
+                                Accessible.name: "Local OpenCode stats"
+                                onToggled: value => {
+                                    root.setLocalStatsEnabled(value);
+                                    if (value && root.activeTab === "opencode")
+                                        root.ensureLocalStats();
+                                }
+                            }
+
+                            Column {
+                                width: parent.width
+                                spacing: Theme.spacingXS
+                                StyledText {
+                                    text: "Zen low-balance alert ($)"
+                                    font.pixelSize: Theme.fontSizeSmall
+                                    font.weight: Font.Medium
+                                    color: Theme.surfaceText
+                                }
+                                DCommonWidgets.DTextField {
+                                    id: zenThresholdField
+                                    width: parent.width
+                                    controlHeight: Theme.buttonHeightXS
+                                    text: contentWrapper.zenThresholdDraft
+                                    labelText: "USD"
+                                    placeholderText: "1.00"
+                                    isError: contentWrapper.zenThresholdInvalid
+                                    supportingText: contentWrapper.zenThresholdInvalid ? "Enter a nonnegative amount with up to 2 decimals." : ""
+                                    validator: DoubleValidator { bottom: 0; decimals: 2; notation: DoubleValidator.StandardNotation; locale: "C" }
+                                    onTextEdited: {
+                                        contentWrapper.zenThresholdDraft = zenThresholdField.text;
+                                        contentWrapper.zenThresholdInvalid = false;
+                                    }
+                                    onEditingFinished: contentWrapper.commitZenThreshold()
+                                    onFocusStateChanged: hasFocus => {
+                                        if (!hasFocus)
+                                            contentWrapper.commitZenThreshold();
+                                    }
+                                    Accessible.name: "Zen low-balance threshold in dollars"
+                                }
+                            }
+                        }
+                    }
+
+                    Row {
+                        id: providerTabs
+                        width: parent.width
+                        spacing: Theme.spacingXS
+
                         Repeater {
                             model: [
-                                {
-                                    key: "opencode",
-                                    label: "Opencode"
-                                },
-                                {
-                                    key: "openai",
-                                    label: "OpenAI"
-                                }
+                                { "id": "opencode", "text": "Opencode", "logo": "opencode-go" },
+                                { "id": "openai", "text": "Codex", "logo": "codex" },
+                                { "id": "claude", "text": "Claude", "logo": "claude" }
                             ]
 
-                            Rectangle {
+                            StyledButton {
+                                id: tabDelegate
                                 required property var modelData
-
-                                width: (mainCol.width - Theme.spacingXS) / 2
-                                height: 72
+                                property bool isActive: root.activeTab === tabDelegate.modelData.id
+                                height: Theme.buttonHeightXS
+                                width: tabLabel.implicitWidth + Theme.iconSizeSmall + Theme.spacingXS * 3
+                                color: isActive ? Theme.surfaceContainerHigh : "transparent"
                                 radius: Theme.cornerRadius
-                                color: root.activeTab === modelData.key ? Theme.surfaceContainerHighest : Theme.surfaceContainerHigh
-                                border.width: root.activeTab === modelData.key ? 2 : 0
-                                border.color: Theme.primary
+                                Accessible.role: Accessible.PageTab
+                                Accessible.name: tabDelegate.modelData.text
+                                Accessible.selected: isActive
+                                onClicked: {
+                                    root.activeTab = tabDelegate.modelData.id;
+                                    root.errorMessage = root.currentError();
+                                    if (root.activeTab === "opencode" && root.localStatsEnabled)
+                                        root.ensureLocalStats();
+                                }
 
-                                Column {
+                                StateLayer {
+                                    control: parent
+                                    stateColor: Theme.surfaceText
+                                    transitionDuration: 150
+                                }
+
+                                Row {
                                     anchors.centerIn: parent
-                                    spacing: 2
+                                    spacing: Theme.spacingXS
 
                                     Image {
-                                        anchors.horizontalCenter: parent.horizontalCenter
-                                        width: 28
-                                        height: 28
-                                        source: root.providerLogoPath(modelData.key)
-                                        sourceSize.width: 28
-                                        sourceSize.height: 28
+                                        width: Theme.iconSizeSmall
+                                        height: Theme.iconSizeSmall
+                                        source: root.providerLogoPath(tabDelegate.modelData.logo)
+                                        sourceSize.width: Theme.iconSizeSmall
+                                        sourceSize.height: Theme.iconSizeSmall
                                         fillMode: Image.PreserveAspectFit
+                                        anchors.verticalCenter: parent.verticalCenter
+                                        layer.enabled: true
+                                        layer.effect: MultiEffect {
+                                            colorization: 1
+                                            colorizationColor: Theme.surfaceText
+                                        }
                                     }
 
                                     StyledText {
-                                        anchors.horizontalCenter: parent.horizontalCenter
-                                        text: modelData.label
+                                        id: tabLabel
+                                        text: tabDelegate.modelData.text
                                         font.pixelSize: Theme.fontSizeSmall
                                         font.weight: Font.Medium
-                                        color: root.activeTab === modelData.key ? Theme.primary : Theme.surfaceText
-                                    }
-                                }
-
-                                MouseArea {
-                                    anchors.fill: parent
-                                    hoverEnabled: true
-                                    cursorShape: Qt.PointingHandCursor
-                                    onClicked: {
-                                        root.activeTab = modelData.key;
-                                        root.errorMessage = root.currentError();
+                                        color: Theme.surfaceText
+                                        anchors.verticalCenter: parent.verticalCenter
                                     }
                                 }
                             }
@@ -504,12 +1546,131 @@ PluginComponent {
                     }
 
                     // Error banner
+                    Column {
+                        id: emptyProviderErrors
+                        width: parent.width
+                        spacing: Theme.spacingXS
+                        visible: root.currentError() !== ""
+
+                        Repeater {
+                            model: ["opencode-go", "opencode-zen", "codex", "claude"]
+                            Column {
+                                id: emptyErrorDelegate
+                                required property string modelData
+                                width: emptyProviderErrors.width
+                                spacing: Theme.spacingXS
+                                visible: root.providerTab(emptyErrorDelegate.modelData) === root.activeTab
+                                    && root.providerError(emptyErrorDelegate.modelData) !== ""
+                                    && !root.currentProviders().some(function (p) { return p && p.provider === emptyErrorDelegate.modelData; })
+                                StyledText {
+                                    width: parent.width
+                                    text: root.formatProviderName(emptyErrorDelegate.modelData) + ": " + root.providerError(emptyErrorDelegate.modelData)
+                                    font.pixelSize: Theme.fontSizeSmall
+                                    color: Theme.error
+                                    wrapMode: Text.WordWrap
+                                }
+                                StyledText {
+                                    width: parent.width
+                                    visible: root.providerHint(emptyErrorDelegate.modelData) !== "" && root.providerHint(emptyErrorDelegate.modelData) !== root.providerError(emptyErrorDelegate.modelData)
+                                    text: root.providerHint(emptyErrorDelegate.modelData)
+                                    font.pixelSize: Theme.fontSizeSmall
+                                    color: Theme.surfaceVariantText
+                                    wrapMode: Text.WordWrap
+                                }
+                                Row {
+                                    spacing: Theme.spacingXS
+                                    DankActionButton {
+                                        iconName: root.fetchActive[emptyErrorDelegate.modelData] ? "progress_activity" : "refresh"
+                                        iconSize: Theme.iconSizeSmall
+                                        buttonSize: Theme.buttonHeightXS
+                                        iconColor: Theme.surfaceText
+                                        backgroundColor: "transparent"
+                                        tooltipText: "Retry " + root.formatProviderName(emptyErrorDelegate.modelData)
+                                        enabled: !root.fetchActive[emptyErrorDelegate.modelData]
+                                        onClicked: root.refreshProvider(emptyErrorDelegate.modelData, true)
+                                    }
+                                    DCommonWidgets.DButton {
+                                        text: contentWrapper.copiedProvider === emptyErrorDelegate.modelData ? "Copied" : "Copy command"
+                                        iconName: contentWrapper.copiedProvider === emptyErrorDelegate.modelData ? "check" : "content_copy"
+                                        visible: root.providerRecoveryCommand(emptyErrorDelegate.modelData) !== ""
+                                        onClicked: contentWrapper.copyRecovery(emptyErrorDelegate.modelData)
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Optional local summary, fetched only while the OpenCode view is opened.
+                    Column {
+                        width: parent.width
+                        spacing: Theme.spacingXXS
+                        visible: root.activeTab === "opencode" && root.localStatsEnabled
+                            && (!!root.localStats || root.localStatsLoading || root.localStatsError !== "")
+                        Component.onCompleted: {
+                            if (root.activeTab === "opencode" && root.localStatsEnabled)
+                                root.ensureLocalStats();
+                        }
+                        Row {
+                            width: parent.width
+                            spacing: Theme.spacingXS
+                            StyledText {
+                                id: localStatsSummary
+                                width: parent.width - localStatsRefresh.width - parent.spacing
+                                text: {
+                                    var stats = root.localStats;
+                                    if (!stats)
+                                        return "";
+                                    var parts = ["Today"];
+                                    var tokens = contentWrapper.compactTokens(stats.totalTokens);
+                                    if (tokens !== "")
+                                        parts.push(tokens + " tokens");
+                                    var sessions = Number(stats.sessions);
+                                    if (isFinite(sessions) && sessions >= 0)
+                                        parts.push(String(Math.round(sessions)) + (Math.round(sessions) === 1 ? " session" : " sessions"));
+                                    return parts.length > 1 ? parts.join(" · ") : "";
+                                }
+                                visible: text !== ""
+                                font.pixelSize: Theme.fontSizeSmall
+                                color: Theme.surfaceVariantText
+                                anchors.verticalCenter: parent.verticalCenter
+                            }
+                            DankActionButton {
+                                id: localStatsRefresh
+                                iconName: root.localStatsLoading ? "progress_activity" : "refresh"
+                                iconSize: Theme.iconSizeSmall
+                                buttonSize: Theme.buttonHeightXS
+                                iconColor: Theme.surfaceText
+                                backgroundColor: "transparent"
+                                tooltipText: root.localStatsLoading ? "Updating local stats" : "Refresh local stats"
+                                enabled: !root.localStatsLoading
+                                onClicked: root.refreshLocalStats(true)
+                            }
+                        }
+                        Row {
+                            width: parent.width
+                            spacing: Theme.spacingXS
+                            visible: root.localStatsLoading || root.localStatsError !== ""
+                            StyledText {
+                                width: parent.width
+                                visible: root.localStatsLoading || root.localStatsError !== ""
+                                text: root.localStatsLoading ? "Updating local stats…" : root.localStatsError
+                                font.pixelSize: Theme.fontSizeSmall
+                                color: root.localStatsLoading ? Theme.surfaceVariantText : Theme.warning
+                                wrapMode: Text.WordWrap
+                                anchors.verticalCenter: parent.verticalCenter
+                            }
+                        }
+                    }
+
                     StyledRect {
                         width: parent.width
                         height: errCol.implicitHeight + Theme.spacingM * 2
                         radius: Theme.cornerRadius
                         color: Qt.rgba(Theme.error.r, Theme.error.g, Theme.error.b, 0.15)
                         visible: root.currentError() !== "" && root.currentProviders().length === 0
+                            && !(root.activeTab === "opencode" && (root.providerError("opencode-go") !== "" || root.providerError("opencode-zen") !== ""))
+                            && !(root.activeTab === "openai" && root.providerError("codex") !== "")
+                            && !(root.activeTab === "claude" && root.providerError("claude") !== "")
 
                         Column {
                             id: errCol
@@ -521,7 +1682,7 @@ PluginComponent {
                                 spacing: Theme.spacingS
                                 DankIcon {
                                     name: "error"
-                                    size: 18
+                                    size: Theme.iconSizeMedium
                                     color: Theme.error
                                     anchors.verticalCenter: parent.verticalCenter
                                 }
@@ -550,6 +1711,7 @@ PluginComponent {
                         model: root.currentProviders()
 
                         StyledRect {
+                            id: providerCardDelegate
                             required property var modelData
                             required property int index
 
@@ -568,225 +1730,289 @@ PluginComponent {
 
                                 // Provider name + login
                                 Row {
+                                    width: parent.width
                                     spacing: Theme.spacingS
 
                                     Image {
-                                        width: 22
-                                        height: 22
-                                        source: root.providerLogoPath(modelData.provider)
-                                        sourceSize.width: 22
-                                        sourceSize.height: 22
+                                        width: Theme.iconSizeMedium
+                                        height: Theme.iconSizeMedium
+                                        source: root.providerLogoPath(providerCardDelegate.modelData.provider)
+                                        sourceSize.width: Theme.iconSizeMedium
+                                        sourceSize.height: Theme.iconSizeMedium
                                         fillMode: Image.PreserveAspectFit
                                         anchors.verticalCenter: parent.verticalCenter
+                                        layer.enabled: true
+                                        layer.effect: MultiEffect {
+                                            colorization: 1
+                                            colorizationColor: Theme.surfaceText
+                                        }
                                     }
 
-                                    StyledText {
-                                        text: root.formatProviderName(modelData.provider)
-                                        font.pixelSize: Theme.fontSizeLarge
-                                        font.weight: Font.Bold
-                                        color: Theme.surfaceText
+                                    Item {
+                                        width: Math.max(0, parent.width - Theme.iconSizeMedium - Theme.spacingS * 3 - pinButton.width - providerRefreshButton.width)
+                                        height: Math.max(providerName.implicitHeight, providerPlan.implicitHeight)
+                                        anchors.verticalCenter: parent.verticalCenter
+
+                                        StyledText {
+                                            id: providerName
+                                            anchors.left: parent.left
+                                            anchors.right: providerPlan.visible ? providerPlan.left : parent.right
+                                            anchors.rightMargin: providerPlan.visible ? Theme.spacingXS : 0
+                                            text: root.formatProviderName(providerCardDelegate.modelData.provider)
+                                            font.pixelSize: Theme.fontSizeLarge
+                                            font.weight: Font.Bold
+                                            color: Theme.surfaceText
+                                            elide: Text.ElideRight
+                                            anchors.verticalCenter: parent.verticalCenter
+                                        }
+
+                                        StyledText {
+                                            id: providerPlan
+                                            visible: !!providerCardDelegate.modelData.usage && !!providerCardDelegate.modelData.usage.plan
+                                            width: visible ? Math.min(implicitWidth, parent.width * 0.38) : 0
+                                            anchors.right: parent.right
+                                            anchors.verticalCenter: parent.verticalCenter
+                                            text: providerCardDelegate.modelData.usage && providerCardDelegate.modelData.usage.plan ? providerCardDelegate.modelData.usage.plan : ""
+                                            font.pixelSize: Theme.fontSizeSmall
+                                            color: Theme.surfaceVariantText
+                                            elide: Text.ElideRight
+                                        }
                                     }
 
+                                    DankActionButton {
+                                        id: pinButton
+                                        iconName: "push_pin"
+                                        iconSize: Theme.iconSizeSmall
+                                        buttonSize: Theme.buttonHeightXS
+                                        checkable: true
+                                        checked: root.isBarSourceSelected(providerCardDelegate.modelData.provider)
+                                        iconColor: checked ? Theme.primary : Theme.surfaceText
+                                        backgroundColor: checked ? Theme.surfaceContainerHighest : "transparent"
+                                        tooltipText: checked ? "Hide " + root.formatProviderName(providerCardDelegate.modelData.provider) + " from bar" : "Show " + root.formatProviderName(providerCardDelegate.modelData.provider) + " in bar"
+                                        Accessible.name: tooltipText
+                                        Accessible.checkable: true
+                                        Accessible.checked: checked
+                                        onClicked: root.toggleBarSource(providerCardDelegate.modelData.provider)
+                                    }
+
+                                    DankActionButton {
+                                        id: providerRefreshButton
+                                        iconName: root.fetchActive[providerCardDelegate.modelData.provider] ? "progress_activity" : "refresh"
+                                        iconSize: Theme.iconSizeSmall
+                                        buttonSize: Theme.buttonHeightXS
+                                        iconColor: Theme.surfaceText
+                                        backgroundColor: "transparent"
+                                        tooltipText: root.fetchActive[providerCardDelegate.modelData.provider] ? "Refreshing " + root.formatProviderName(providerCardDelegate.modelData.provider) : "Refresh " + root.formatProviderName(providerCardDelegate.modelData.provider)
+                                        enabled: !root.fetchActive[providerCardDelegate.modelData.provider]
+                                        RotationAnimation on rotation {
+                                            from: 0
+                                            to: 360
+                                            duration: 900
+                                            loops: Animation.Infinite
+                                            running: root.fetchActive[providerCardDelegate.modelData.provider]
+                                            onRunningChanged: if (!running) providerRefreshButton.rotation = 0
+                                        }
+                                        onClicked: root.refreshProvider(providerCardDelegate.modelData.provider, true)
+                                    }
+                                }
+
+                                Row {
+                                    width: parent.width
+                                    spacing: Theme.spacingXS
+                                    visible: root.isBarSourceSelected(providerCardDelegate.modelData.provider)
+                                        && providerCardDelegate.modelData.provider !== "opencode-zen"
+                                        && contentWrapper.windowOptions(providerCardDelegate.modelData.provider, providerCardDelegate.modelData.usage).length >= 2
                                     StyledText {
-                                        visible: !!modelData.usage && !!modelData.usage.plan
-                                        text: modelData.usage && modelData.usage.plan ? modelData.usage.plan : ""
+                                        id: inBarLabel
+                                        text: "In bar"
                                         font.pixelSize: Theme.fontSizeSmall
                                         color: Theme.surfaceVariantText
                                         anchors.verticalCenter: parent.verticalCenter
                                     }
+                                    DCommonWidgets.DFilterChips {
+                                        id: barWindowChips
+                                        property var options: contentWrapper.windowOptions(providerCardDelegate.modelData.provider, providerCardDelegate.modelData.usage)
+                                        width: parent.width - inBarLabel.implicitWidth - parent.spacing
+                                        model: options.map(function (option) { return option.label; })
+                                        currentIndex: {
+                                            var key = root.selectedWindowKey(providerCardDelegate.modelData.provider);
+                                            var index = options.findIndex(function (option) { return option.key === key; });
+                                            return index >= 0 ? index : 0;
+                                        }
+                                        showCheck: false
+                                        showCounts: false
+                                        chipHeight: Theme.buttonHeightXS
+                                        chipPadding: Theme.spacingS
+                                        onSelectionChanged: index => {
+                                            var options = contentWrapper.windowOptions(providerCardDelegate.modelData.provider, providerCardDelegate.modelData.usage);
+                                            if (index >= 0 && index < options.length)
+                                                root.setBarSourceWindow(providerCardDelegate.modelData.provider, options[index].key);
+                                        }
+                                    }
+                                }
+
+                                Row {
+                                    spacing: Theme.spacingXS
+                                    visible: root.providerUpdatedLabel(providerCardDelegate.modelData.provider) !== "" || root.providerIsStale(providerCardDelegate.modelData.provider)
+
+                                    StyledText {
+                                        text: root.providerIsStale(providerCardDelegate.modelData.provider) ? "Stale · " + root.providerUpdatedLabel(providerCardDelegate.modelData.provider) : "Updated " + root.providerUpdatedLabel(providerCardDelegate.modelData.provider)
+                                        font.pixelSize: Theme.fontSizeSmall
+                                        color: root.providerIsStale(providerCardDelegate.modelData.provider) ? Theme.warning : Theme.surfaceVariantText
+                                    }
                                 }
 
                                 StyledText {
-                                    visible: !!modelData.usage && modelData.usage.creditsRemaining !== undefined
-                                    text: "Credits remaining: " + (modelData.usage ? modelData.usage.creditsRemaining : "")
+                                    visible: !!providerCardDelegate.modelData.usage && providerCardDelegate.modelData.usage.creditsRemaining !== undefined
+                                    text: "Credits remaining: " + (providerCardDelegate.modelData.usage ? providerCardDelegate.modelData.usage.creditsRemaining : "")
                                     font.pixelSize: Theme.fontSizeSmall
                                     color: Theme.surfaceVariantText
                                 }
 
                                 // Error state for this provider
                                 Row {
-                                    visible: !!modelData.error
+                                    width: parent.width
+                                    visible: root.providerError(providerCardDelegate.modelData.provider) !== "" || !!providerCardDelegate.modelData.error
                                     spacing: Theme.spacingXS
 
                                     DankIcon {
                                         name: "warning"
-                                        size: 14
+                                        size: Theme.iconSizeSmall
                                         color: Theme.error
                                         anchors.verticalCenter: parent.verticalCenter
                                     }
 
                                     StyledText {
-                                        text: modelData.error ? (modelData.error.message || "Error") : ""
+                                        width: Math.max(0, parent.width - Theme.iconSizeSmall - Theme.spacingXS)
+                                        text: root.providerError(providerCardDelegate.modelData.provider) || (providerCardDelegate.modelData.error ? (providerCardDelegate.modelData.error.message || "Error") : "")
                                         font.pixelSize: Theme.fontSizeSmall
                                         color: Theme.error
+                                        anchors.verticalCenter: parent.verticalCenter
+                                        wrapMode: Text.WordWrap
+                                    }
+                                }
+
+                                Row {
+                                    width: parent.width
+                                    spacing: Theme.spacingXS
+                                    visible: (root.providerError(providerCardDelegate.modelData.provider) !== "" || !!providerCardDelegate.modelData.error)
+                                        && (root.providerHint(providerCardDelegate.modelData.provider) !== "" || root.providerRecoveryCommand(providerCardDelegate.modelData.provider) !== "")
+                                    StyledText {
+                                        width: Math.max(0, parent.width - recoveryActions.width - Theme.spacingXS)
+                                        visible: root.providerHint(providerCardDelegate.modelData.provider) !== ""
+                                            && root.providerHint(providerCardDelegate.modelData.provider) !== root.providerError(providerCardDelegate.modelData.provider)
+                                        text: root.providerHint(providerCardDelegate.modelData.provider)
+                                        font.pixelSize: Theme.fontSizeSmall
+                                        color: Theme.surfaceVariantText
+                                        wrapMode: Text.WordWrap
+                                        anchors.verticalCenter: parent.verticalCenter
+                                    }
+                                    Row {
+                                        id: recoveryActions
+                                        spacing: Theme.spacingXXS
+                                        DankActionButton {
+                                            iconName: root.fetchActive[providerCardDelegate.modelData.provider] ? "progress_activity" : "refresh"
+                                            iconSize: Theme.iconSizeSmall
+                                            buttonSize: Theme.buttonHeightXS
+                                            iconColor: Theme.surfaceText
+                                            backgroundColor: "transparent"
+                                            tooltipText: "Retry " + root.formatProviderName(providerCardDelegate.modelData.provider)
+                                            enabled: !root.fetchActive[providerCardDelegate.modelData.provider]
+                                            onClicked: root.refreshProvider(providerCardDelegate.modelData.provider, true)
+                                        }
+                                        DCommonWidgets.DButton {
+                                            text: contentWrapper.copiedProvider === providerCardDelegate.modelData.provider ? "Copied" : "Copy command"
+                                            iconName: contentWrapper.copiedProvider === providerCardDelegate.modelData.provider ? "check" : "content_copy"
+                                            visible: root.providerRecoveryCommand(providerCardDelegate.modelData.provider) !== ""
+                                            onClicked: contentWrapper.copyRecovery(providerCardDelegate.modelData.provider)
+                                        }
+                                    }
+                                }
+
+                                Row {
+                                    visible: providerCardDelegate.modelData.provider === "opencode-zen" && root.providerBalanceText(providerCardDelegate.modelData.usage) !== ""
+                                    spacing: Theme.spacingS
+
+                                    StyledText {
+                                        text: "Balance"
+                                        font.pixelSize: Theme.fontSizeSmall
+                                        color: Theme.surfaceVariantText
+                                        anchors.verticalCenter: parent.verticalCenter
+                                    }
+                                    StyledText {
+                                        text: root.providerBalanceText(providerCardDelegate.modelData.usage)
+                                        font.pixelSize: Theme.fontSizeSmall
+                                        font.weight: Font.Medium
+                                        color: Theme.surfaceText
                                         anchors.verticalCenter: parent.verticalCenter
                                     }
                                 }
 
-                                // Primary window
-                                Column {
-                                    width: parent.width
-                                    spacing: 2
-                                    visible: !!modelData.usage && !!root.primaryUsage(modelData.usage)
-
-                                    Item {
-                                        width: parent.width
-                                        height: Math.max(primLabel.implicitHeight, primValue.implicitHeight)
-
-                                        StyledText {
-                                            id: primLabel
-                                            anchors.left: parent.left
-                                            text: root.primaryLabel(modelData.provider)
-                                            font.pixelSize: Theme.fontSizeSmall
-                                            color: Theme.surfaceVariantText
-                                        }
-                                        StyledText {
-                                            id: primValue
-                                            anchors.right: parent.right
-                                            text: {
-                                                var usage = root.primaryUsage(modelData.usage);
-                                                if (!usage)
-                                                    return "";
-                                                var pct = Math.round(usage.usedPercent);
-                                                var reset = root.formatTimeUntil(usage.resetsAt);
-                                                return pct + "%" + (reset ? " \u00B7 " + reset : "");
-                                            }
-                                            font.pixelSize: Theme.fontSizeSmall
-                                            color: root.getUsageColor(root.primaryUsage(modelData.usage) ? root.primaryUsage(modelData.usage).usedPercent : 0)
-                                        }
-                                    }
-
-                                    Rectangle {
-                                        width: parent.width
-                                        height: 6
-                                        radius: 3
-                                        color: Theme.surfaceContainerHighest
-
-                                        Rectangle {
-                                            width: {
-                                                var usage = root.primaryUsage(modelData.usage);
-                                                var pct = usage ? usage.usedPercent : 0;
-                                                return Math.min(1, pct / 100) * parent.width;
-                                            }
-                                            height: parent.height
-                                            radius: parent.radius
-                                            color: root.getUsageColor(root.primaryUsage(modelData.usage) ? root.primaryUsage(modelData.usage).usedPercent : 0)
-                                            Behavior on width {
-                                                NumberAnimation {
-                                                    duration: 300
-                                                    easing.type: Easing.OutCubic
-                                                }
-                                            }
-                                        }
-                                    }
+                                StyledText {
+                                    visible: providerCardDelegate.modelData.provider === "opencode-zen" && providerCardDelegate.modelData.usage && root.validNumber(providerCardDelegate.modelData.usage.availableDollars) !== null && ((root.validNumber(providerCardDelegate.modelData.usage.balanceDollars) !== null && Math.abs(Number(providerCardDelegate.modelData.usage.availableDollars) - Number(providerCardDelegate.modelData.usage.balanceDollars)) >= 0.01) || (root.validNumber(providerCardDelegate.modelData.usage.balanceMicroCents) !== null && Math.abs(Number(providerCardDelegate.modelData.usage.availableDollars) - Number(providerCardDelegate.modelData.usage.balanceMicroCents) / 100000000) >= 0.01))
+                                    text: "Available: $" + Number(providerCardDelegate.modelData.usage.availableDollars).toFixed(2)
+                                    font.pixelSize: Theme.fontSizeSmall
+                                    color: Theme.surfaceVariantText
                                 }
 
-                                // Secondary window
-                                Column {
-                                    width: parent.width
-                                    spacing: 2
-                                    visible: !!modelData.usage && !!root.secondaryUsage(modelData.usage)
-
-                                    Item {
-                                        width: parent.width
-                                        height: Math.max(secLabel.implicitHeight, secValue.implicitHeight)
-
-                                        StyledText {
-                                            id: secLabel
-                                            anchors.left: parent.left
-                                            text: root.secondaryLabel(modelData.provider)
-                                            font.pixelSize: Theme.fontSizeSmall
-                                            color: Theme.surfaceVariantText
-                                        }
-                                        StyledText {
-                                            id: secValue
-                                            anchors.right: parent.right
-                                            text: {
-                                                var usage = root.secondaryUsage(modelData.usage);
-                                                if (!usage)
-                                                    return "";
-                                                var pct = Math.round(usage.usedPercent);
-                                                var reset = root.formatTimeUntil(usage.resetsAt);
-                                                return pct + "%" + (reset ? " \u00B7 " + reset : "");
-                                            }
-                                            font.pixelSize: Theme.fontSizeSmall
-                                            color: root.getUsageColor(root.secondaryUsage(modelData.usage) ? root.secondaryUsage(modelData.usage).usedPercent : 0)
-                                        }
+                                StyledText {
+                                    visible: providerCardDelegate.modelData.provider === "opencode-zen" && providerCardDelegate.modelData.usage && !!(providerCardDelegate.modelData.usage.billingMode || providerCardDelegate.modelData.usage.mode)
+                                    text: {
+                                        var mode = String(providerCardDelegate.modelData.usage.billingMode || providerCardDelegate.modelData.usage.mode).toLowerCase();
+                                        if (mode === "prepaid") return "Prepaid";
+                                        if (mode === "payg" || mode === "pay-as-you-go" || mode === "pay_as_you_go") return "Pay as you go";
+                                        return providerCardDelegate.modelData.usage.billingMode || providerCardDelegate.modelData.usage.mode;
                                     }
-
-                                    Rectangle {
-                                        width: parent.width
-                                        height: 6
-                                        radius: 3
-                                        color: Theme.surfaceContainerHighest
-
-                                        Rectangle {
-                                            width: {
-                                                var usage = root.secondaryUsage(modelData.usage);
-                                                var pct = usage ? usage.usedPercent : 0;
-                                                return Math.min(1, pct / 100) * parent.width;
-                                            }
-                                            height: parent.height
-                                            radius: parent.radius
-                                            color: root.getUsageColor(root.secondaryUsage(modelData.usage) ? root.secondaryUsage(modelData.usage).usedPercent : 0)
-                                            Behavior on width {
-                                                NumberAnimation {
-                                                    duration: 300
-                                                    easing.type: Easing.OutCubic
-                                                }
-                                            }
-                                        }
-                                    }
+                                    font.pixelSize: Theme.fontSizeSmall
+                                    color: Theme.surfaceVariantText
                                 }
 
-                                // Monthly window
-                                Column {
-                                    width: parent.width
-                                    spacing: 2
-                                    visible: !!modelData.usage && !!root.tertiaryUsage(modelData.usage)
-
-                                    Item {
+                                Repeater {
+                                    model: providerCardDelegate.modelData.provider === "opencode-zen" ? [] : root.providerUsageWindows(providerCardDelegate.modelData.provider, providerCardDelegate.modelData.usage)
+                                    Column {
+                                        id: quotaWindowDelegate
+                                        required property var modelData
                                         width: parent.width
-                                        height: Math.max(terLabel.implicitHeight, terValue.implicitHeight)
+                                        spacing: Theme.spacingXXS
+                                        visible: !!quotaWindowDelegate.modelData.window
 
-                                        StyledText {
-                                            id: terLabel
-                                            anchors.left: parent.left
-                                            text: "Monthly"
-                                            font.pixelSize: Theme.fontSizeSmall
-                                            color: Theme.surfaceVariantText
-                                        }
-                                        StyledText {
-                                            id: terValue
-                                            anchors.right: parent.right
-                                            text: {
-                                                var usage = root.tertiaryUsage(modelData.usage);
-                                                if (!usage)
-                                                    return "";
-                                                var pct = Math.round(usage.usedPercent);
-                                                var reset = root.formatTimeUntil(usage.resetsAt);
-                                                return pct + "%" + (reset ? " \u00B7 " + reset : "");
+                                        Item {
+                                            width: parent.width
+                                            height: Math.max(windowLabel.implicitHeight, windowValue.implicitHeight)
+                                            StyledText {
+                                                id: windowLabel
+                                                anchors.left: parent.left
+                                                text: quotaWindowDelegate.modelData.label + " · " + (root.usageDisplayMode === "remaining" ? "Remaining" : "Used")
+                                                font.pixelSize: Theme.fontSizeSmall
+                                                color: Theme.surfaceVariantText
                                             }
-                                            font.pixelSize: Theme.fontSizeSmall
-                                            color: root.getUsageColor(root.tertiaryUsage(modelData.usage) ? root.tertiaryUsage(modelData.usage).usedPercent : 0)
+                                            StyledText {
+                                                id: windowValue
+                                                anchors.right: parent.right
+                                                text: {
+                                                    var usage = quotaWindowDelegate.modelData.window;
+                                                    var pct = Math.round(root.displayPercent(usage));
+                                                    var reset = root.formatTimeUntil(usage.resetsAt);
+                                                    return pct + "%" + (reset ? " · " + reset : "");
+                                                }
+                                                font.pixelSize: Theme.fontSizeSmall
+                                                color: root.getUsageColor(quotaWindowDelegate.modelData.window.usedPercent)
+                                            }
                                         }
-                                    }
-
-                                    Rectangle {
-                                        width: parent.width
-                                        height: 6
-                                        radius: 3
-                                        color: Theme.surfaceContainerHighest
-
                                         Rectangle {
-                                            width: {
-                                                var usage = root.tertiaryUsage(modelData.usage);
-                                                var pct = usage ? usage.usedPercent : 0;
-                                                return Math.min(1, pct / 100) * parent.width;
+                                            width: parent.width
+                                            height: Theme.spacingS
+                                            radius: Theme.cornerRadiusFull
+                                            color: Theme.surfaceContainerHighest
+                                            Rectangle {
+                                                width: Math.max(0, Math.min(1, root.displayPercent(quotaWindowDelegate.modelData.window) / 100)) * parent.width
+                                                height: parent.height
+                                                radius: parent.radius
+                                                color: root.getUsageColor(quotaWindowDelegate.modelData.window.usedPercent)
+                                                Behavior on width {
+                                                    NumberAnimation { duration: 300; easing.type: Easing.OutCubic }
+                                                }
                                             }
-                                            height: parent.height
-                                            radius: parent.radius
-                                            color: root.getUsageColor(root.tertiaryUsage(modelData.usage) ? root.tertiaryUsage(modelData.usage).usedPercent : 0)
                                         }
                                     }
                                 }
@@ -797,7 +2023,7 @@ PluginComponent {
                     // No providers
                     StyledText {
                         visible: root.currentProviders().length === 0 && root.currentError() === "" && !root.isLoading
-                        text: root.activeTab === "openai" ? "No OpenAI usage found. Run 'opentracker fetch codex' to configure." : "No providers found. Run 'opentracker login opencode-go' to configure."
+                        text: root.activeTab === "openai" ? "No Codex usage found. Run 'opentracker fetch codex' to configure." : root.activeTab === "claude" ? "No Claude usage found. Run 'opentracker fetch claude' to configure." : "No Opencode providers found. Run 'opentracker login opencode-go' to configure."
                         font.pixelSize: Theme.fontSizeMedium
                         color: Theme.surfaceVariantText
                         width: parent.width

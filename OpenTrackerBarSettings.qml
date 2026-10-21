@@ -2,6 +2,7 @@ import QtQuick
 import qs.Common
 import qs.Widgets
 import qs.Modules.Plugins
+import qs.DCommon.Widgets as DCommonWidgets
 
 PluginSettings {
     id: root
@@ -9,7 +10,7 @@ PluginSettings {
 
     StyledText {
         width: parent.width
-        text: "OpenTracker"
+        text: "OpenTrackerBar"
         font.pixelSize: Theme.fontSizeLarge
         font.weight: Font.Bold
         color: Theme.surfaceText
@@ -17,7 +18,7 @@ PluginSettings {
 
     StyledText {
         width: parent.width
-        text: "Monitor Opencode and OpenAI Codex usage via opentracker CLI. Click the widget to switch between provider tabs."
+        text: "Track Opencode Go usage, Zen balance, and Codex and Claude limits with the opentracker CLI. Click the bar widget to switch providers."
         font.pixelSize: Theme.fontSizeSmall
         color: Theme.surfaceVariantText
         wrapMode: Text.WordWrap
@@ -43,7 +44,7 @@ PluginSettings {
     DankDropdown {
         id: refreshDropdown
         text: "Refresh Interval"
-        description: "How often to fetch usage data via opentracker"
+        description: "How often to refresh Opencode (Go + Zen) and Codex usage"
         currentValue: root.loadValue("refreshInterval", "120000")
         options: ["60000", "120000", "300000", "900000", "1800000"]
         dropdownWidth: 180
@@ -82,43 +83,35 @@ PluginSettings {
         opacity: 0.3
     }
 
-    // --- Bar Provider ---
-
     StyledText {
         width: parent.width
-        text: "Bar Display"
+        text: "Project"
         font.pixelSize: Theme.fontSizeMedium
         font.weight: Font.Medium
         color: Theme.surfaceText
     }
 
-    DankDropdown {
-        id: barProviderDropdown
-        text: "Bar Provider"
-        description: "Which providers to show in the bar pill"
-        currentValue: root.loadValue("barProvider", "auto")
-        options: ["auto", "opencode", "openai", "both"]
-        dropdownWidth: 240
-        onValueChanged: function (value) {
-            root.saveValue("barProvider", value);
-        }
-    }
-
-    StyledText {
+    Flow {
         width: parent.width
-        leftPadding: Theme.spacingM
-        text: {
-            var v = barProviderDropdown.currentValue;
-            if (v === "auto") return "Shows the provider with the highest usage";
-            if (v === "opencode") return "Shows only Opencode usage";
-            if (v === "openai") return "Shows only OpenAI usage";
-            if (v === "both") return "Shows both Opencode and OpenAI usage";
-            return "";
+        spacing: Theme.spacingS
+
+        DCommonWidgets.DButton {
+            text: "Star on GitHub"
+            iconName: "star"
+            onClicked: Qt.openUrlExternally("https://github.com/wsmajt/OpenTrackerBar")
         }
-        font.pixelSize: Theme.fontSizeSmall
-        font.italic: true
-        color: Theme.surfaceVariantText
-        wrapMode: Text.WordWrap
+
+        DCommonWidgets.DButton {
+            text: "Source code"
+            iconName: "code"
+            onClicked: Qt.openUrlExternally("https://github.com/wsmajt/OpenTrackerBar")
+        }
+
+        DCommonWidgets.DButton {
+            text: "Report an issue"
+            iconName: "bug_report"
+            onClicked: Qt.openUrlExternally("https://github.com/wsmajt/OpenTrackerBar/issues/new")
+        }
     }
 
 }
