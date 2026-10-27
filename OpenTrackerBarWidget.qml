@@ -32,6 +32,7 @@ PluginComponent {
     property string claudeJsonBuffer: ""
     property int pendingFetches: 0
     property var providerTimes: ({ "opencode-go": 0, "opencode-zen": 0, "codex": 0, "claude": 0 })
+    property var providerStale: ({})
     property var providerErrors: ({ "opencode-go": "", "opencode-zen": "", "codex": "", "claude": "" })
     property var fetchActive: ({ "opencode-go": false, "opencode-zen": false, "codex": false, "claude": false })
     property var fetchTimeouts: ({ "opencode-go": "", "opencode-zen": "", "codex": "", "claude": "" })
@@ -77,28 +78,28 @@ PluginComponent {
         if (providers.length === 0)
             return null;
         var filtered = providers.filter(function (p) {
-            return p && p.usage && root.barUsageWindow(p.provider, p.usage) && !p.error;
+            return p && p.usage && root.barUsageWindow(root.sourceIdOf(p), p.usage) && !p.error;
         });
         if (filtered.length === 0)
             return null;
         var highest = filtered[0];
         for (var i = 1; i < filtered.length; i++) {
-            if (root.barUsageWindow(filtered[i].provider, filtered[i].usage).usedPercent > root.barUsageWindow(highest.provider, highest.usage).usedPercent)
+            if (root.barUsageWindow(root.sourceIdOf(filtered[i]), filtered[i].usage).usedPercent > root.barUsageWindow(root.sourceIdOf(highest), highest.usage).usedPercent)
                 highest = filtered[i];
         }
         return highest;
     }
 
     readonly property real highestPercent: {
-        if (!highestProvider || !highestProvider.usage || !root.barUsageWindow(highestProvider.provider, highestProvider.usage))
+        if (!highestProvider || !highestProvider.usage || !root.barUsageWindow(root.sourceIdOf(highestProvider), highestProvider.usage))
             return 0;
-        return root.barUsageWindow(highestProvider.provider, highestProvider.usage).usedPercent;
+        return root.barUsageWindow(root.sourceIdOf(highestProvider), highestProvider.usage).usedPercent;
     }
 
     readonly property string highestName: {
         if (!highestProvider)
             return "N/A";
-        return formatProviderName(highestProvider.provider);
+        return root.sourceName(highestProvider);
     }
 
     readonly property var barProviders: root.selectBarProviders(root.providers, root.barSources)
@@ -107,7 +108,12 @@ PluginComponent {
         var allowed = ["opencode-go", "opencode-zen", "codex", "claude"];
         if (!Array.isArray(value))
             return ["opencode-go", "opencode-zen", "codex"];
-        return allowed.filter(function (id) { return value.indexOf(id) !== -1; });
+        var result = allowed.filter(function (id) { return value.indexOf(id) !== -1; });
+        value.forEach(function (id) {
+            if (root.validSourceId(id) && result.indexOf(id) === -1)
+                result.push(id);
+        });
+        return result;
     }
 
     function legacyBarSources(value) {
@@ -119,12 +125,12 @@ PluginComponent {
     }
 
     function isBarSourceSelected(id) {
-        return ["opencode-go", "opencode-zen", "codex", "claude"].indexOf(id) !== -1 && root.barSources.indexOf(id) !== -1;
+        return ( ["opencode-go", "opencode-zen", "codex", "claude"].indexOf(id) !== -1 || root.validSourceId(id)) && root.barSources.indexOf(id) !== -1;
     }
 
     function toggleBarSource(id) {
         var allowed = ["opencode-go", "opencode-zen", "codex", "claude"];
-        if (allowed.indexOf(id) === -1 || !root.pluginService || !root.pluginId || typeof root.pluginService.savePluginData !== "function")
+        if ((allowed.indexOf(id) === -1 && !root.validSourceId(id)) || !root.pluginService || !root.pluginId || typeof root.pluginService.savePluginData !== "function")
             return false;
         var next;
         if (root.isBarSourceSelected(id))
@@ -155,38 +161,97 @@ PluginComponent {
         if (["primary", "secondary"].indexOf(value.codex) !== -1) result.codex = value.codex;
         if (value["opencode-zen"] === "none") result["opencode-zen"] = "none";
         if (["fiveHour", "sevenDay", "sonnet", "opus"].indexOf(value.claude) !== -1) result.claude = value.claude;
+        Object.keys(value).forEach(function (id) {
+            var kind = root.sourceKind(id);
+            var valid = kind === "codex" ? ["primary", "secondary"] : kind === "claude" ? ["fiveHour", "sevenDay", "sonnet", "opus"] : [];
+            if (root.validSourceId(id) && valid.indexOf(value[id]) !== -1) result[id] = value[id];
+        });
         return result;
     }
 
+    function validSourceId(id) { return typeof id === "string" && /^cliproxyapi:(codex|claude):[A-Za-z0-9._-]+$/.test(id); }
+    function sourceIdOf(item) { return item && typeof item.sourceId === "string" && item.sourceId ? item.sourceId : item ? item.provider : ""; }
+    function sourceKind(id) { return typeof id === "string" && id.indexOf("cliproxyapi:") === 0 ? id.split(":")[1] : id; }
+    function maskAccountEmail(value) {
+        if (typeof value !== "string" || /[\s\u0000-\u001f\u007f]/.test(value)) return "";
+        var at = value.indexOf("@");
+        if (at <= 0 || at !== value.lastIndexOf("@") || at === value.length - 1) return "";
+        var local = Array.from(value.slice(0, at)), domain = Array.from(value.slice(at + 1));
+        if (!local.length || !domain.length) return "";
+        return local.slice(0, 2).join("") + "***@" + domain.slice(0, 2).join("") + "***";
+    }
+    function safeUsage(value) {
+        var result = {};
+        Object.keys(value || {}).forEach(function (key) { if (key !== "accountEmail") result[key] = value[key]; });
+        return result;
+    }
+    function sourceName(item) {
+        if (!item) return "";
+        var kind = root.sourceKind(root.sourceIdOf(item));
+        if (item.accountLabel) {
+            var peersWithLabel = root.providers.filter(function (entry) { return entry && entry.provider === kind && entry.accountLabel === item.accountLabel; }).slice().sort(function (a, b) { return root.sourceIdOf(a) < root.sourceIdOf(b) ? -1 : 1; });
+            var labelIndex = peersWithLabel.findIndex(function (entry) { return root.sourceIdOf(entry) === root.sourceIdOf(item); });
+            return root.formatProviderName(kind) + " · " + item.accountLabel + (peersWithLabel.length > 1 ? " · " + (labelIndex + 1) : "");
+        }
+        if (item.origin !== "cliproxyapi") return root.formatProviderName(item.provider);
+        var id = root.sourceIdOf(item), kind = root.sourceKind(id), peers = root.providers.filter(function (entry) { return entry && entry.origin === "cliproxyapi" && root.sourceKind(root.sourceIdOf(entry)) === kind; }).slice().sort(function (a, b) { return root.sourceIdOf(a) < root.sourceIdOf(b) ? -1 : 1; });
+        return root.formatProviderName(kind) + " · Proxy " + (peers.findIndex(function (entry) { return root.sourceIdOf(entry) === id; }) + 1);
+    }
+    function sourceFetching(id) { return !!root.fetchActive[root.sourceKind(id)]; }
+    function sourceUpdatedLabel(id) { return root.providerUpdatedLabel(id); }
+    function sourceIsStale(id) { return root.providerIsStale(id); }
+    function sourceError(id) {
+        var kind = root.sourceKind(id);
+        var category = root.providerErrors[kind] || "";
+        if (category === "partial")
+            return root.providerStale && root.providerStale[id] ? root.providerError(kind) : "";
+        return root.providerError(kind);
+    }
+    function sourceHint(id) { return root.providerHint(root.sourceKind(id)); }
+    function sourceRecoveryCommand(id) { return root.providerRecoveryCommand(root.sourceKind(id)); }
+    function availableSourceWindows(item) { return root.availableBarWindows(root.sourceKind(root.sourceIdOf(item)), item ? item.usage : null); }
+    function selectedSourceWindowKey(item) { return root.selectedWindowKey(root.sourceIdOf(item)); }
+    function setSourceWindow(item, key) { return item ? root.setBarSourceWindow(root.sourceIdOf(item), key) : false; }
+    function sourceUsageWindow(item) { return item ? root.barUsageWindow(root.sourceIdOf(item), item.usage) : null; }
+    function sourceWindowLabel(item) { return item ? root.barWindowLabel(root.sourceIdOf(item), item.usage) : ""; }
+
     function selectedWindowKey(provider) {
+        if (root.validSourceId(provider)) return root.barSourceWindows[provider] || (root.sourceKind(provider) === "claude" ? "fiveHour" : "primary");
         return provider === "opencode-go" ? root.barSourceWindows[provider] || "rolling" : provider === "codex" ? root.barSourceWindows[provider] || "primary" : provider === "claude" ? root.barSourceWindows[provider] || "fiveHour" : "none";
     }
 
     function availableBarWindows(provider, usage) {
+        provider = root.sourceKind(provider);
         var candidates = provider === "opencode-go" ? [["rolling", "Rolling", root.primaryUsage(usage)], ["weekly", "Weekly", root.secondaryUsage(usage)], ["monthly", "Monthly", root.tertiaryUsage(usage)]] : provider === "codex" ? [["primary", "Session", root.primaryUsage(usage)], ["secondary", "Weekly", root.secondaryUsage(usage)]] : provider === "claude" ? [["fiveHour", "5-hour", root.claudeUsageWindow(usage, "fiveHour")], ["sevenDay", "Weekly", root.claudeUsageWindow(usage, "sevenDay")], ["sonnet", "Sonnet", root.claudeUsageWindow(usage, "sonnet")], ["opus", "Opus", root.claudeUsageWindow(usage, "opus")]] : [];
         return candidates.filter(function (entry) { return root.validUsageWindow(entry[2]); }).map(function (entry) { return { key: entry[0], label: entry[1] }; });
     }
 
     function barUsageWindow(provider, usage) {
-        var windows = root.availableBarWindows(provider, usage);
+        var sourceId = provider;
+        var kind = root.sourceKind(sourceId);
+        var windows = root.availableBarWindows(kind, usage);
         if (!windows.length) return null;
-        var key = root.selectedWindowKey(provider);
+        var key = root.selectedWindowKey(sourceId);
         var actual = windows.find(function (entry) { return entry.key === key; }) || windows[0];
-        if (provider === "claude") return root.claudeUsageWindow(usage, actual.key);
+        if (kind === "claude") return root.claudeUsageWindow(usage, actual.key);
         return actual.key === "rolling" || actual.key === "primary" ? root.primaryUsage(usage) : actual.key === "weekly" || actual.key === "secondary" ? root.secondaryUsage(usage) : root.tertiaryUsage(usage);
     }
 
     function barWindowLabel(provider, usage) {
-        var windows = root.availableBarWindows(provider, usage);
+        var sourceId = provider;
+        var kind = root.sourceKind(sourceId);
+        var windows = root.availableBarWindows(kind, usage);
         if (!windows.length) return "";
-        var key = root.selectedWindowKey(provider);
+        var key = root.selectedWindowKey(sourceId);
         return (windows.find(function (entry) { return entry.key === key; }) || windows[0]).label;
     }
 
     function setBarSourceWindow(provider, key) {
-        if (provider !== "opencode-go" && provider !== "codex" && provider !== "claude") return false;
-        var item = root.providers.find(function (entry) { return entry.provider === provider; });
-        if (!item || !root.availableBarWindows(provider, item.usage).some(function (entry) { return entry.key === key; })) return false;
+        var kind = root.sourceKind(provider);
+        if (kind !== "opencode-go" && kind !== "codex" && kind !== "claude") return false;
+        if (root.validSourceId(provider) && root.barSourceWindows[provider] === key) return true;
+        var item = root.providers.find(function (entry) { return root.sourceIdOf(entry) === provider; });
+        if (!item || !root.availableBarWindows(kind, item.usage).some(function (entry) { return entry.key === key; })) return false;
         var next = Object.assign({}, root.barSourceWindows);
         next[provider] = key;
         return root.savePluginSetting("barSourceWindows", next);
@@ -223,7 +288,7 @@ PluginComponent {
         var selected = root.normalizeBarSources(selectedSources);
         selected.forEach(function (id) {
             var provider = sourceProviders.find(function (p) {
-                return p && p.provider === id && !p.error && (root.barUsageWindow(id, p.usage) || (id === "opencode-zen" && root.hasZenBalance(p.usage)));
+                return p && root.sourceIdOf(p) === id && !p.error && (root.barUsageWindow(id, p.usage) || (id === "opencode-zen" && root.hasZenBalance(p.usage)));
             });
             if (provider)
                 list.push(provider);
@@ -234,21 +299,21 @@ PluginComponent {
     readonly property var barHighestProvider: {
         if (root.barProviders.length === 0)
             return null;
-        var quotaProviders = root.barProviders.filter(function (p) { return root.barUsageWindow(p.provider, p.usage); });
+        var quotaProviders = root.barProviders.filter(function (p) { return root.barUsageWindow(root.sourceIdOf(p), p.usage); });
         if (quotaProviders.length === 0)
             return null;
         var highest = quotaProviders[0];
         for (var i = 1; i < quotaProviders.length; i++) {
-            if (root.barUsageWindow(quotaProviders[i].provider, quotaProviders[i].usage).usedPercent > root.barUsageWindow(highest.provider, highest.usage).usedPercent)
+            if (root.barUsageWindow(root.sourceIdOf(quotaProviders[i]), quotaProviders[i].usage).usedPercent > root.barUsageWindow(root.sourceIdOf(highest), highest.usage).usedPercent)
                 highest = quotaProviders[i];
         }
         return highest;
     }
 
     readonly property real barHighestPercent: {
-        if (!root.barHighestProvider || !root.barHighestProvider.usage || !root.barUsageWindow(root.barHighestProvider.provider, root.barHighestProvider.usage))
+        if (!root.barHighestProvider || !root.barHighestProvider.usage || !root.barUsageWindow(root.sourceIdOf(root.barHighestProvider), root.barHighestProvider.usage))
             return 0;
-        return root.barUsageWindow(root.barHighestProvider.provider, root.barHighestProvider.usage).usedPercent;
+        return root.barUsageWindow(root.sourceIdOf(root.barHighestProvider), root.barHighestProvider.usage).usedPercent;
     }
 
     // === Helpers ===
@@ -318,7 +383,7 @@ PluginComponent {
 
     function providerError(id) {
         var category = providerErrors[id] || "";
-        return ({ "missing-cli": "OpenTracker CLI is not installed", "not-configured": "Provider is not configured", "auth-expired": "Sign-in has expired", "rate-limited": "Provider is rate limited", "http-error": "Provider request failed", "timeout": "Provider request timed out", "invalid-output": "Provider returned invalid data", "empty-output": "Provider returned no data", "unknown": "Provider request failed" })[category] || "";
+        return ({ "partial": "Some accounts could not be refreshed", "missing-cli": "OpenTracker CLI is not installed", "not-configured": "Provider is not configured", "auth-expired": "Sign-in has expired", "rate-limited": "Provider is rate limited", "http-error": "Provider request failed", "timeout": "Provider request timed out", "invalid-output": "Provider returned invalid data", "empty-output": "Provider returned no data", "unknown": "Provider request failed" })[category] || "";
     }
 
     function providerHint(id) {
@@ -360,6 +425,7 @@ PluginComponent {
     }
 
     function providerIsStale(id) {
+        if (root.providerStale && root.providerStale[id]) return true;
         var updated = root.providerUpdatedAt(id);
         return updated > 0 && root.clockNow - updated >= root.refreshIntervalMs * 2;
     }
@@ -396,13 +462,13 @@ PluginComponent {
     function barProviderText(provider) {
         if (!provider || !provider.usage)
             return "";
-        var quota = root.barUsageWindow(provider.provider, provider.usage);
+        var quota = root.barUsageWindow(root.sourceIdOf(provider), provider.usage);
         return quota ? Math.round(root.displayPercent(quota)) + "%" : root.providerBalanceText(provider.usage);
     }
 
     function barTooltipText() {
         return root.barProviders.map(function (provider) {
-            var id = provider.provider;
+            var id = root.sourceIdOf(provider);
             var quota = root.barUsageWindow(id, provider.usage);
             var details = (quota ? root.barWindowLabel(id, provider.usage) + " (" + root.usageDisplayMode + ")" : "Balance") + " " + root.barProviderText(provider);
             if (quota && typeof quota.resetsAt === "string") {
@@ -410,7 +476,7 @@ PluginComponent {
                 if (reset)
                     details += " · resets " + reset;
             }
-            var error = root.providerError(id);
+            var error = root.sourceError(id);
             var age = root.providerUpdatedLabel(id);
             if (error)
                 details += " · " + error;
@@ -418,7 +484,7 @@ PluginComponent {
                 details += " · updated " + age;
             if (root.providerIsStale(id))
                 details += " · stale";
-            return root.formatProviderName(id) + ": " + details;
+            return root.sourceName(provider) + ": " + details;
         }).join("\n");
     }
 
@@ -470,10 +536,93 @@ PluginComponent {
         root.providers = root.opencodeProviders.concat(root.openaiProviders, root.claudeProviders);
     }
 
+    function inspectFamilyOutput(target, raw) {
+        if (!raw || !raw.trim()) throw new Error("Empty output");
+        var data = JSON.parse(raw);
+        if (!Array.isArray(data)) data = [data];
+        var normalized = [];
+        var invalidIds = ({});
+        var hasInvalid = false;
+        data.forEach(function (item) {
+            if (!item || typeof item !== "object" || Array.isArray(item)) { hasInvalid = true; return; }
+            var kind, sourceId, origin, usage, accountLabel = "";
+            if (item.provider === target) { kind = target; sourceId = target; origin = "local"; accountLabel = root.maskAccountEmail(item.usage && item.usage.accountEmail); usage = root.safeUsage(item.usage); }
+            else if (item.provider === "cliproxyapi" && item.usage && item.usage.accountProvider === target) {
+                kind = target;
+                var identity = target === "codex" ? item.usage.accountId || item.usage.authIndex : item.usage.authIndex;
+                sourceId = typeof identity === "string" ? "cliproxyapi:" + target + ":" + identity : "";
+                if (!root.validSourceId(sourceId)) { hasInvalid = true; return; }
+                origin = "cliproxyapi"; accountLabel = root.maskAccountEmail(item.usage.accountEmail || (item.usage.usage && item.usage.usage.accountEmail)); usage = root.safeUsage(item.usage.usage);
+            } else if (item.provider === "cliproxyapi") { hasInvalid = true; return; }
+            else return;
+            if (item.error || !usage || typeof usage !== "object" || Array.isArray(usage) || root.availableBarWindows(kind, usage).length === 0) {
+                hasInvalid = true;
+                if (sourceId) invalidIds[sourceId] = true;
+                return;
+            }
+            normalized.push({ provider: kind, sourceId: sourceId, origin: origin, usage: usage, accountLabel: accountLabel });
+        });
+        var seen = ({});
+        normalized = normalized.filter(function (entry) { if (seen[entry.sourceId]) return false; seen[entry.sourceId] = true; return true; });
+        normalized.sort(function (a, b) { return a.origin === b.origin ? (a.sourceId < b.sourceId ? -1 : a.sourceId > b.sourceId ? 1 : 0) : a.origin === "local" ? -1 : 1; });
+        return { items: normalized, invalidIds: invalidIds, hasInvalid: hasInvalid };
+    }
+
+    function normalizeFamilyOutput(target, raw) {
+        var result = root.inspectFamilyOutput(target, raw);
+        var normalized = result.items;
+        if (!normalized.length) throw new Error("No valid account data");
+        return normalized;
+    }
+
+    function commitFamilyOutput(target, inspection, partial) {
+        var previous = target === "codex" ? root.openaiProviders : root.claudeProviders;
+        var known = ({});
+        inspection.items.forEach(function (entry) { known[entry.sourceId] = true; });
+        var next = inspection.items.slice();
+        if (partial) previous.forEach(function (entry) { if (!known[root.sourceIdOf(entry)]) next.push(entry); });
+        next.sort(function (a, b) { return a.origin === b.origin ? (root.sourceIdOf(a) < root.sourceIdOf(b) ? -1 : root.sourceIdOf(a) > root.sourceIdOf(b) ? 1 : 0) : a.origin === "local" ? -1 : 1; });
+        if (target === "codex") root.openaiProviders = next; else root.claudeProviders = next;
+        var times = Object.assign({}, root.providerTimes);
+        var errors = Object.assign({}, root.providerErrors);
+        var stale = Object.assign({}, root.providerStale);
+        next.forEach(function (entry) {
+            var id = root.sourceIdOf(entry);
+            if (known[id]) { times[id] = Date.now(); errors[id] = ""; delete stale[id]; }
+            else if (partial) stale[id] = true;
+        });
+        Object.keys(inspection.invalidIds).forEach(function (id) { if (!known[id]) stale[id] = true; });
+        if (!partial) Object.keys(stale).forEach(function (id) { if (root.sourceKind(id) === target) delete stale[id]; });
+        if (known[target]) times[target] = Date.now();
+        root.providerTimes = times; root.providerErrors = errors; root.providerStale = stale;
+        root.setProviderError(target, partial ? "partial" : "");
+        root.mergeProviders();
+        root.opencodeError = root.providerError("opencode-go") || root.providerError("opencode-zen");
+        root.openaiError = root.providerError("codex"); root.claudeError = root.providerError("claude");
+        root.hasError = root.opencodeError !== "" || root.openaiError !== "" || root.claudeError !== "";
+        root.errorMessage = root.currentError();
+        root.lastUpdated = Qt.formatDateTime(new Date(), "hh:mm:ss");
+        inspection.items.forEach(function (entry) { root.evaluateProviderAlerts(entry.sourceId); });
+        return true;
+    }
+
+    function markFamilyStale(target, category) {
+        var previous = target === "codex" ? root.openaiProviders : root.claudeProviders;
+        var stale = Object.assign({}, root.providerStale);
+        previous.forEach(function (entry) { stale[root.sourceIdOf(entry)] = true; });
+        root.providerStale = stale;
+        root.setProviderError(target, category);
+    }
+
     function parseProviderOutput(target, raw) {
         if (!raw || !raw.trim())
             throw new Error("Empty output");
         var data = JSON.parse(raw);
+        if (target === "codex" || target === "claude") {
+            var inspection = root.inspectFamilyOutput(target, raw);
+            if (!inspection.items.length || inspection.hasInvalid) throw new Error("Provider account data is invalid");
+            return root.commitFamilyOutput(target, inspection, false);
+        }
         if (!Array.isArray(data))
             data = [data];
         data = data.filter(function (item) { return item && typeof item === "object" && !Array.isArray(item) && item.provider === target; });
@@ -516,13 +665,14 @@ PluginComponent {
     }
 
     function alertWindows(provider, usage) {
+        var kind = root.sourceKind(provider);
         var windows = [];
-        if (provider === "claude")
-            return root.providerUsageWindows(provider, usage).map(function (entry) { return { key: provider + ":" + entry.key, label: "Claude " + entry.label, window: entry.window }; });
-        var candidates = provider === "opencode-go" ? [["rolling", root.primaryUsage(usage)], ["weekly", root.secondaryUsage(usage)], ["monthly", root.tertiaryUsage(usage)]] : [["primary", root.primaryUsage(usage)], ["secondary", root.secondaryUsage(usage)]];
+        if (kind === "claude")
+            return root.providerUsageWindows(kind, usage).map(function (entry) { return { key: provider + ":" + entry.key, label: (provider === kind ? "Claude " : "Claude proxy account ") + entry.label, window: entry.window }; });
+        var candidates = kind === "opencode-go" ? [["rolling", root.primaryUsage(usage)], ["weekly", root.secondaryUsage(usage)], ["monthly", root.tertiaryUsage(usage)]] : [["primary", root.primaryUsage(usage)], ["secondary", root.secondaryUsage(usage)]];
         candidates.forEach(function (entry) {
             if (root.validUsageWindow(entry[1]))
-                windows.push({ key: provider + ":" + entry[0], label: (provider === "codex" ? "Codex " : "Opencode Go ") + entry[0], window: entry[1] });
+                windows.push({ key: provider + ":" + entry[0], label: (provider === "codex" ? "Codex " : provider === "opencode-go" ? "Opencode Go " : "Codex proxy account ") + entry[0], window: entry[1] });
         });
         return windows;
     }
@@ -573,11 +723,12 @@ PluginComponent {
         var prefs = root.alertPrefs();
         state.pending = state.pending.filter(function (pending) { return Date.now() - pending.time < 180000; });
         var item;
-        if (provider === "opencode-zen")
+        var kind = root.sourceKind(provider);
+        if (kind === "opencode-zen")
             item = root.opencodeProviders.find(function (entry) { return entry.provider === provider && !entry.error && root.hasZenBalance(entry.usage); });
         else {
-            var sourceProviders = provider === "codex" ? root.openaiProviders : provider === "claude" ? root.claudeProviders : root.opencodeProviders;
-            item = sourceProviders.find(function (entry) { return entry.provider === provider && !entry.error && root.alertWindows(provider, entry.usage).length > 0; });
+            var sourceProviders = kind === "codex" ? root.openaiProviders : kind === "claude" ? root.claudeProviders : root.opencodeProviders;
+            item = sourceProviders.find(function (entry) { return root.sourceIdOf(entry) === provider && !entry.error && root.alertWindows(provider, entry.usage).length > 0; });
         }
         if (!item)
             return;
@@ -591,7 +742,7 @@ PluginComponent {
             return;
         var priorSource = state.sources[provider] ? JSON.parse(JSON.stringify(state.sources[provider])) : null;
         var events = [];
-        if (provider === "opencode-zen") {
+        if (kind === "opencode-zen") {
             var sourceState = state.sources[provider] || {};
             var balance = root.validNumber(item.usage.balanceDollars);
             if (balance === null) balance = root.validNumber(item.usage.balanceMicroCents) / 100000000;
@@ -625,9 +776,13 @@ PluginComponent {
             state.sources[provider] = sourceState;
         }
         if (events.length) {
-            if (root.alertQueue.length >= 3)
+            if (root.alertQueue.length >= 3) {
+                if (priorSource) state.sources[provider] = priorSource;
+                else delete state.sources[provider];
+                root.saveAlertState(state);
                 return;
-            var body = provider === "opencode-zen" ? events[0].body : events.map(function (entry) { return entry.label + " " + entry.used + "% used; threshold " + entry.thresholds.join(" and "); }).join("\n");
+            }
+            var body = kind === "opencode-zen" ? events[0].body : events.map(function (entry) { return entry.label + " " + entry.used + "% used; threshold " + entry.thresholds.join(" and "); }).join("\n");
             var desired = JSON.parse(JSON.stringify(state.sources[provider]));
             if (priorSource) state.sources[provider] = priorSource;
             else delete state.sources[provider];
@@ -686,7 +841,7 @@ PluginComponent {
                 state.sources[record.provider] = record.desired;
                 state.sourcePrefs[record.provider] = record.prefs;
             } else if (exitCode !== 0 || timedOut || root.alertTimedOut) {
-                console.warn("opentracker: alert sender failed for " + record.provider + " (exit " + exitCode + (timedOut || root.alertTimedOut ? ", timeout" : "") + ")");
+                console.warn("opentracker: alert sender failed for " + root.sourceKind(record.provider) + " (exit " + exitCode + (timedOut || root.alertTimedOut ? ", timeout" : "") + ")");
             }
             root.removeAlertReservation(state, record.token);
             root.saveAlertState(state);
@@ -717,16 +872,24 @@ PluginComponent {
         root.pendingFetches = Math.max(0, root.pendingFetches - 1);
         root.isLoading = root.pendingFetches > 0;
 
-        if (exitCode === 0 && raw && raw.trim().length > 0 && !reason) {
+        if ((exitCode === 0 || exitCode === 1) && raw && raw.trim().length > 0 && !reason && (target === "codex" || target === "claude")) {
+            try {
+                var inspection = root.inspectFamilyOutput(target, raw);
+                if (!inspection.items.length && !inspection.hasInvalid) throw new Error("No valid account data");
+                root.commitFamilyOutput(target, inspection, exitCode === 1 || inspection.hasInvalid);
+            } catch (e) { root.markFamilyStale(target, "invalid-output"); }
+        } else if (exitCode === 0 && raw && raw.trim().length > 0 && !reason) {
             try {
                 root.parseProviderOutput(target, raw);
             } catch (e) {
-                root.setProviderError(target, "invalid-output");
+                if (target === "codex" || target === "claude") root.markFamilyStale(target, "invalid-output");
+                else root.setProviderError(target, "invalid-output");
             }
         } else {
             var category = root.classifyProviderFailure(target, root.fetchStderr[target], exitCode, fetchWasStarted, reason);
             if (exitCode === 0 && (!raw || !raw.trim())) category = "empty-output";
-            root.setProviderError(target, category);
+            if (target === "codex" || target === "claude") root.markFamilyStale(target, category);
+            else root.setProviderError(target, category);
         }
         var started = Object.assign({}, root.fetchStarted); started[target] = false; root.fetchStarted = started;
         var stderr = Object.assign({}, root.fetchStderr); stderr[target] = ""; root.fetchStderr = stderr;
@@ -1122,7 +1285,7 @@ PluginComponent {
                         }
 
                         StyledText {
-                            text: barProviderDelegate.modelData.provider === "opencode-zen" ? "Zen" : barProviderDelegate.modelData.provider === "opencode-go" ? "Go" : root.formatProviderName(barProviderDelegate.modelData.provider)
+                            text: barProviderDelegate.modelData.origin === "cliproxyapi" ? root.sourceName(barProviderDelegate.modelData) : barProviderDelegate.modelData.provider === "opencode-zen" ? "Zen" : barProviderDelegate.modelData.provider === "opencode-go" ? "Go" : root.formatProviderName(barProviderDelegate.modelData.provider)
                             font.pixelSize: Theme.fontSizeSmall
                             font.weight: Font.Medium
                             color: Theme.surfaceText
@@ -1130,10 +1293,13 @@ PluginComponent {
                         }
 
                         StyledText {
-                            text: root.barProviderText(barProviderDelegate.modelData)
+                            text: {
+                                var window = root.sourceUsageWindow(barProviderDelegate.modelData);
+                                return window ? Math.round(root.displayPercent(window)) + "%" : root.barProviderText(barProviderDelegate.modelData);
+                            }
                             font.pixelSize: Theme.fontSizeSmall
                             font.weight: Font.Medium
-                                    color: root.barUsageWindow(barProviderDelegate.modelData.provider, barProviderDelegate.modelData.usage) ? root.getUsageColor(root.barUsageWindow(barProviderDelegate.modelData.provider, barProviderDelegate.modelData.usage).usedPercent) : Theme.surfaceText
+                            color: root.sourceUsageWindow(barProviderDelegate.modelData) ? root.getUsageColor(root.sourceUsageWindow(barProviderDelegate.modelData).usedPercent) : Theme.surfaceText
                             anchors.verticalCenter: parent.verticalCenter
                         }
                     }
@@ -1202,18 +1368,19 @@ PluginComponent {
                 spacing: Theme.spacingXS
 
                 StyledText {
-                    visible: root.barSources.length > 0
+                        visible: root.barSources.length > 0
                     text: {
                         var provider = root.barHighestProvider;
                         if (!provider)
                             provider = root.barProviders.find(function (p) { return p && p.provider === "opencode-zen" && p.usage; }) || null;
                         if (!provider)
                             return "--";
-                        return root.barProviderText(provider);
+                        var window = root.sourceUsageWindow(provider);
+                        return window ? Math.round(root.displayPercent(window)) + "%" : root.barProviderText(provider);
                     }
                     font.pixelSize: Theme.fontSizeSmall
                     font.weight: Font.Medium
-                    color: root.barHighestProvider && root.barUsageWindow(root.barHighestProvider.provider, root.barHighestProvider.usage) ? root.getUsageColor(root.barUsageWindow(root.barHighestProvider.provider, root.barHighestProvider.usage).usedPercent) : Theme.surfaceText
+                    color: root.barHighestProvider && root.sourceUsageWindow(root.barHighestProvider) ? root.getUsageColor(root.sourceUsageWindow(root.barHighestProvider).usedPercent) : Theme.surfaceText
                     anchors.horizontalCenter: parent.horizontalCenter
                 }
 
@@ -1281,7 +1448,7 @@ PluginComponent {
                 }
 
                 function copyRecovery(provider) {
-                    var command = root.providerRecoveryCommand(provider);
+                    var command = root.sourceRecoveryCommand(provider);
                     if (!command || typeof DMSService === "undefined")
                         return;
                     DMSService.sendRequest("clipboard.copy", { "text": command }, function (response) {
@@ -1549,6 +1716,62 @@ PluginComponent {
                         }
                     }
 
+                    StyledRect {
+                        id: partialAccountsBanner
+                        width: parent.width
+                        readonly property string family: root.activeTab === "openai" ? "codex" : "claude"
+                        readonly property bool partialFailure: root.providerErrors[family] === "partial"
+                        readonly property bool fullFailure: root.providerError(family) !== "" && !partialFailure
+                        visible: root.activeTab !== "opencode" && root.currentProviders().length > 0 && (partialFailure || fullFailure)
+                        height: Math.max(partialMessage.implicitHeight, partialActions.implicitHeight) + Theme.spacingS * 2
+                        radius: Theme.cornerRadius
+                        color: Qt.rgba(Theme.warning.r, Theme.warning.g, Theme.warning.b, 0.12)
+                        StyledText {
+                            id: partialMessage
+                            anchors.left: parent.left
+                            anchors.right: partialActions.left
+                            anchors.rightMargin: Theme.spacingXS
+                            anchors.verticalCenter: parent.verticalCenter
+                            anchors.margins: Theme.spacingS
+                            text: partialAccountsBanner.partialFailure ? "Some accounts could not be refreshed"
+                                : root.providerError(partialAccountsBanner.family) + (root.providerHint(partialAccountsBanner.family) !== "" ? "\n" + root.providerHint(partialAccountsBanner.family) : "")
+                            font.pixelSize: Theme.fontSizeSmall
+                            color: Theme.warning
+                            wrapMode: Text.WordWrap
+                        }
+                        Row {
+                            id: partialActions
+                            anchors.right: parent.right
+                            anchors.rightMargin: Theme.spacingXS
+                            anchors.verticalCenter: parent.verticalCenter
+                            spacing: Theme.spacingXXS
+                            DankActionButton {
+                                iconName: "refresh"
+                                iconSize: Theme.iconSizeSmall
+                                buttonSize: Theme.buttonHeightXS
+                                iconColor: Theme.surfaceText
+                                backgroundColor: "transparent"
+                                tooltipText: "Refresh " + (root.activeTab === "openai" ? "Codex accounts" : "Claude accounts")
+                                enabled: !root.fetchActive[partialAccountsBanner.family]
+                                onClicked: root.refreshProvider(partialAccountsBanner.family, true)
+                            }
+                            DCommonWidgets.DButton {
+                                text: contentWrapper.copiedProvider === "family-" + root.activeTab ? "Copied" : "Copy command"
+                                iconName: contentWrapper.copiedProvider === "family-" + root.activeTab ? "check" : "content_copy"
+                                onClicked: {
+                                    var command = root.providerRecoveryCommand(partialAccountsBanner.family);
+                                    if (command && typeof DMSService !== "undefined")
+                                        DMSService.sendRequest("clipboard.copy", { "text": command }, function (response) {
+                                            if (response && !response.error && response.result !== false && response.success !== false) {
+                                                contentWrapper.copiedProvider = "family-" + root.activeTab;
+                                                copiedStatusTimer.restart();
+                                            }
+                                        });
+                                }
+                            }
+                        }
+                    }
+
                     // Error banner
                     Column {
                         id: emptyProviderErrors
@@ -1762,7 +1985,7 @@ PluginComponent {
                                             anchors.left: parent.left
                                             anchors.right: providerPlan.visible ? providerPlan.left : parent.right
                                             anchors.rightMargin: providerPlan.visible ? Theme.spacingXS : 0
-                                            text: root.formatProviderName(providerCardDelegate.modelData.provider)
+                                            text: root.sourceName(providerCardDelegate.modelData)
                                             font.pixelSize: Theme.fontSizeLarge
                                             font.weight: Font.Bold
                                             color: Theme.surfaceText
@@ -1789,31 +2012,31 @@ PluginComponent {
                                         iconSize: Theme.iconSizeSmall
                                         buttonSize: Theme.buttonHeightXS
                                         checkable: true
-                                        checked: root.isBarSourceSelected(providerCardDelegate.modelData.provider)
+                                        checked: root.isBarSourceSelected(root.sourceIdOf(providerCardDelegate.modelData))
                                         iconColor: checked ? Theme.primary : Theme.surfaceText
                                         backgroundColor: checked ? Theme.surfaceContainerHighest : "transparent"
-                                        tooltipText: checked ? "Hide " + root.formatProviderName(providerCardDelegate.modelData.provider) + " from bar" : "Show " + root.formatProviderName(providerCardDelegate.modelData.provider) + " in bar"
+                                        tooltipText: checked ? "Hide " + root.sourceName(providerCardDelegate.modelData) + " from bar" : "Show " + root.sourceName(providerCardDelegate.modelData) + " in bar"
                                         Accessible.name: tooltipText
                                         Accessible.checkable: true
                                         Accessible.checked: checked
-                                        onClicked: root.toggleBarSource(providerCardDelegate.modelData.provider)
+                                        onClicked: root.toggleBarSource(root.sourceIdOf(providerCardDelegate.modelData))
                                     }
 
                                     DankActionButton {
                                         id: providerRefreshButton
-                                        iconName: root.fetchActive[providerCardDelegate.modelData.provider] ? "progress_activity" : "refresh"
+                                        iconName: root.sourceFetching(root.sourceIdOf(providerCardDelegate.modelData)) ? "progress_activity" : "refresh"
                                         iconSize: Theme.iconSizeSmall
                                         buttonSize: Theme.buttonHeightXS
                                         iconColor: Theme.surfaceText
                                         backgroundColor: "transparent"
-                                        tooltipText: root.fetchActive[providerCardDelegate.modelData.provider] ? "Refreshing " + root.formatProviderName(providerCardDelegate.modelData.provider) : "Refresh " + root.formatProviderName(providerCardDelegate.modelData.provider)
-                                        enabled: !root.fetchActive[providerCardDelegate.modelData.provider]
+                                        tooltipText: root.sourceFetching(root.sourceIdOf(providerCardDelegate.modelData)) ? "Refreshing " + (providerCardDelegate.modelData.provider === "codex" ? "Codex accounts" : "Claude accounts") : (providerCardDelegate.modelData.origin === "cliproxyapi" ? "Refresh " + (providerCardDelegate.modelData.provider === "codex" ? "Codex accounts" : "Claude accounts") : "Refresh " + root.sourceName(providerCardDelegate.modelData))
+                                        enabled: !root.sourceFetching(root.sourceIdOf(providerCardDelegate.modelData))
                                         RotationAnimation on rotation {
                                             from: 0
                                             to: 360
                                             duration: 900
                                             loops: Animation.Infinite
-                                            running: root.fetchActive[providerCardDelegate.modelData.provider]
+                                            running: root.sourceFetching(root.sourceIdOf(providerCardDelegate.modelData))
                                             onRunningChanged: if (!running) providerRefreshButton.rotation = 0
                                         }
                                         onClicked: root.refreshProvider(providerCardDelegate.modelData.provider, true)
@@ -1823,7 +2046,7 @@ PluginComponent {
                                 Row {
                                     width: parent.width
                                     spacing: Theme.spacingXS
-                                    visible: root.isBarSourceSelected(providerCardDelegate.modelData.provider)
+                                    visible: root.isBarSourceSelected(root.sourceIdOf(providerCardDelegate.modelData))
                                         && providerCardDelegate.modelData.provider !== "opencode-zen"
                                         && contentWrapper.windowOptions(providerCardDelegate.modelData.provider, providerCardDelegate.modelData.usage).length >= 2
                                     StyledText {
@@ -1835,11 +2058,11 @@ PluginComponent {
                                     }
                                     DCommonWidgets.DFilterChips {
                                         id: barWindowChips
-                                        property var options: contentWrapper.windowOptions(providerCardDelegate.modelData.provider, providerCardDelegate.modelData.usage)
+                                        property var options: root.availableSourceWindows(providerCardDelegate.modelData)
                                         width: parent.width - inBarLabel.implicitWidth - parent.spacing
                                         model: options.map(function (option) { return option.label; })
                                         currentIndex: {
-                                            var key = root.selectedWindowKey(providerCardDelegate.modelData.provider);
+                                            var key = root.selectedSourceWindowKey(providerCardDelegate.modelData);
                                             var index = options.findIndex(function (option) { return option.key === key; });
                                             return index >= 0 ? index : 0;
                                         }
@@ -1848,21 +2071,21 @@ PluginComponent {
                                         chipHeight: Theme.buttonHeightXS
                                         chipPadding: Theme.spacingS
                                         onSelectionChanged: index => {
-                                            var options = contentWrapper.windowOptions(providerCardDelegate.modelData.provider, providerCardDelegate.modelData.usage);
+                                            var options = root.availableSourceWindows(providerCardDelegate.modelData);
                                             if (index >= 0 && index < options.length)
-                                                root.setBarSourceWindow(providerCardDelegate.modelData.provider, options[index].key);
+                                                root.setSourceWindow(providerCardDelegate.modelData, options[index].key);
                                         }
                                     }
                                 }
 
                                 Row {
                                     spacing: Theme.spacingXS
-                                    visible: root.providerUpdatedLabel(providerCardDelegate.modelData.provider) !== "" || root.providerIsStale(providerCardDelegate.modelData.provider)
+                                    visible: root.sourceUpdatedLabel(root.sourceIdOf(providerCardDelegate.modelData)) !== "" || root.sourceIsStale(root.sourceIdOf(providerCardDelegate.modelData))
 
                                     StyledText {
-                                        text: root.providerIsStale(providerCardDelegate.modelData.provider) ? "Stale · " + root.providerUpdatedLabel(providerCardDelegate.modelData.provider) : "Updated " + root.providerUpdatedLabel(providerCardDelegate.modelData.provider)
+                                        text: root.sourceIsStale(root.sourceIdOf(providerCardDelegate.modelData)) ? "Stale · " + root.sourceUpdatedLabel(root.sourceIdOf(providerCardDelegate.modelData)) : "Updated " + root.sourceUpdatedLabel(root.sourceIdOf(providerCardDelegate.modelData))
                                         font.pixelSize: Theme.fontSizeSmall
-                                        color: root.providerIsStale(providerCardDelegate.modelData.provider) ? Theme.warning : Theme.surfaceVariantText
+                                        color: root.sourceIsStale(root.sourceIdOf(providerCardDelegate.modelData)) ? Theme.warning : Theme.surfaceVariantText
                                     }
                                 }
 
@@ -1876,7 +2099,7 @@ PluginComponent {
                                 // Error state for this provider
                                 Row {
                                     width: parent.width
-                                    visible: root.providerError(providerCardDelegate.modelData.provider) !== "" || !!providerCardDelegate.modelData.error
+                                    visible: providerCardDelegate.modelData.origin !== "cliproxyapi" && (root.sourceError(root.sourceIdOf(providerCardDelegate.modelData)) !== "" || !!providerCardDelegate.modelData.error)
                                     spacing: Theme.spacingXS
 
                                     DankIcon {
@@ -1888,7 +2111,7 @@ PluginComponent {
 
                                     StyledText {
                                         width: Math.max(0, parent.width - Theme.iconSizeSmall - Theme.spacingXS)
-                                        text: root.providerError(providerCardDelegate.modelData.provider) || (providerCardDelegate.modelData.error ? (providerCardDelegate.modelData.error.message || "Error") : "")
+                                        text: root.sourceError(root.sourceIdOf(providerCardDelegate.modelData)) || (providerCardDelegate.modelData.error ? "Account data is unavailable" : "")
                                         font.pixelSize: Theme.fontSizeSmall
                                         color: Theme.error
                                         anchors.verticalCenter: parent.verticalCenter
@@ -1899,13 +2122,12 @@ PluginComponent {
                                 Row {
                                     width: parent.width
                                     spacing: Theme.spacingXS
-                                    visible: (root.providerError(providerCardDelegate.modelData.provider) !== "" || !!providerCardDelegate.modelData.error)
-                                        && (root.providerHint(providerCardDelegate.modelData.provider) !== "" || root.providerRecoveryCommand(providerCardDelegate.modelData.provider) !== "")
+                                    visible: providerCardDelegate.modelData.origin !== "cliproxyapi" && root.sourceError(root.sourceIdOf(providerCardDelegate.modelData)) !== ""
+                                        && (root.sourceHint(root.sourceIdOf(providerCardDelegate.modelData)) !== "" || root.sourceRecoveryCommand(root.sourceIdOf(providerCardDelegate.modelData)) !== "")
                                     StyledText {
                                         width: Math.max(0, parent.width - recoveryActions.width - Theme.spacingXS)
-                                        visible: root.providerHint(providerCardDelegate.modelData.provider) !== ""
-                                            && root.providerHint(providerCardDelegate.modelData.provider) !== root.providerError(providerCardDelegate.modelData.provider)
-                                        text: root.providerHint(providerCardDelegate.modelData.provider)
+                                        visible: root.sourceHint(root.sourceIdOf(providerCardDelegate.modelData)) !== ""
+                                        text: root.sourceHint(root.sourceIdOf(providerCardDelegate.modelData))
                                         font.pixelSize: Theme.fontSizeSmall
                                         color: Theme.surfaceVariantText
                                         wrapMode: Text.WordWrap
@@ -1915,19 +2137,19 @@ PluginComponent {
                                         id: recoveryActions
                                         spacing: Theme.spacingXXS
                                         DankActionButton {
-                                            iconName: root.fetchActive[providerCardDelegate.modelData.provider] ? "progress_activity" : "refresh"
+                                            iconName: root.sourceFetching(root.sourceIdOf(providerCardDelegate.modelData)) ? "progress_activity" : "refresh"
                                             iconSize: Theme.iconSizeSmall
                                             buttonSize: Theme.buttonHeightXS
                                             iconColor: Theme.surfaceText
                                             backgroundColor: "transparent"
-                                            tooltipText: "Retry " + root.formatProviderName(providerCardDelegate.modelData.provider)
-                                            enabled: !root.fetchActive[providerCardDelegate.modelData.provider]
+                                            tooltipText: "Retry " + (providerCardDelegate.modelData.provider === "codex" ? "Codex accounts" : "Claude accounts")
+                                            enabled: !root.sourceFetching(root.sourceIdOf(providerCardDelegate.modelData))
                                             onClicked: root.refreshProvider(providerCardDelegate.modelData.provider, true)
                                         }
                                         DCommonWidgets.DButton {
                                             text: contentWrapper.copiedProvider === providerCardDelegate.modelData.provider ? "Copied" : "Copy command"
                                             iconName: contentWrapper.copiedProvider === providerCardDelegate.modelData.provider ? "check" : "content_copy"
-                                            visible: root.providerRecoveryCommand(providerCardDelegate.modelData.provider) !== ""
+                                            visible: root.sourceRecoveryCommand(root.sourceIdOf(providerCardDelegate.modelData)) !== ""
                                             onClicked: contentWrapper.copyRecovery(providerCardDelegate.modelData.provider)
                                         }
                                     }

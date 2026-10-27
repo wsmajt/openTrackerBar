@@ -19,7 +19,7 @@ function functionSource(name) {
 
 function makeRoot() {
     const root = {
-        providers: [], opencodeProviders: [], openaiProviders: [], claudeProviders: [],
+        providers: [], opencodeProviders: [], openaiProviders: [], claudeProviders: [], providerStale: {},
         providerTimes: { "opencode-go": 0, "opencode-zen": 0, codex: 0, claude: 0 },
         providerErrors: { "opencode-go": "", "opencode-zen": "", codex: "", claude: "" }, fetchStarted: { "opencode-go": false, "opencode-zen": false, codex: false, claude: false }, fetchStderr: { "opencode-go": "", "opencode-zen": "", codex: "", claude: "" },
         fetchActive: { "opencode-go": false, "opencode-zen": false, codex: false, claude: false },
@@ -45,7 +45,7 @@ function makeRoot() {
     for (const key of ["providerErrors", "providerTimes", "clockNow", "refreshIntervalMs", "fetchActive", "fetchTimeouts", "fetchAwaitingExit", "fetchStarted", "fetchStderr", "pendingFetches", "isLoading", "activeTab", "localStatsEnabled", "localStats", "localStatsLoading", "localStatsError", "localStatsBuffer", "localStatsStderr", "localStatsStarted", "localStatsAwaitingExit", "localStatsUpdatedAt", "interactionActive", "barSourceWindows", "claudeProviders", "claudeError"])
         Object.defineProperty(globals, key, { get: () => root[key], set: value => { root[key] = value; } });
     const context = vm.createContext(globals);
-    const names = ["parseProviderOutput", "mergeProviders", "setProviderError", "finishFetch", "providerError", "providerHint", "providerRecoveryCommand", "classifyProviderFailure", "appendFetchStderr", "markFetchStarted", "providerUpdatedAt", "providerIsStale", "providerUpdatedLabel", "providerBalanceText", "barProviderText", "primaryUsage", "secondaryUsage", "tertiaryUsage", "claudeUsageWindow", "providerUsageWindows", "validNumber", "validUsageWindow", "hasZenBalance", "getUsageColor", "formatProviderName", "providerLogoPath", "providerTab", "currentProviders", "currentError", "normalizeBarSources", "legacyBarSources", "isBarSourceSelected", "toggleBarSource", "normalizeBarSourceWindows", "selectedWindowKey", "availableBarWindows", "barUsageWindow", "barWindowLabel", "setBarSourceWindow", "setLocalStatsEnabled", "selectBarProviders", "primaryLabel", "barTooltipText", "formatTimeUntil", "startFetch", "refreshProvider", "timeoutFetch", "savePluginSetting", "setUsageDisplayMode", "setNotificationsEnabled", "setZenBalanceThreshold", "displayPercent", "alertWindows", "alertState", "alertPrefs", "removeAlertReservation", "removeAlertReservationForProvider", "saveAlertState", "baselineAlertSource", "evaluateProviderAlerts", "startNextAlert", "finishAlert", "localDayBounds", "parseLocalStats", "ensureLocalStats", "invalidateLocalStatsForDay", "refreshLocalStats", "finishLocalStats", "localStatsMissingBinary", "localStatsNeedsUpgrade", "timeoutLocalStats"];
+    const names = ["parseProviderOutput", "inspectFamilyOutput", "normalizeFamilyOutput", "commitFamilyOutput", "markFamilyStale", "sourceIdOf", "sourceKind", "sourceName", "maskAccountEmail", "safeUsage", "sourceFetching", "sourceUpdatedLabel", "sourceIsStale", "sourceError", "sourceHint", "sourceRecoveryCommand", "availableSourceWindows", "selectedSourceWindowKey", "setSourceWindow", "sourceUsageWindow", "sourceWindowLabel", "validSourceId", "mergeProviders", "setProviderError", "finishFetch", "providerError", "providerHint", "providerRecoveryCommand", "classifyProviderFailure", "appendFetchStderr", "markFetchStarted", "providerUpdatedAt", "providerIsStale", "providerUpdatedLabel", "providerBalanceText", "barProviderText", "primaryUsage", "secondaryUsage", "tertiaryUsage", "claudeUsageWindow", "providerUsageWindows", "validNumber", "validUsageWindow", "hasZenBalance", "getUsageColor", "formatProviderName", "providerLogoPath", "providerTab", "currentProviders", "currentError", "normalizeBarSources", "legacyBarSources", "isBarSourceSelected", "toggleBarSource", "normalizeBarSourceWindows", "selectedWindowKey", "availableBarWindows", "barUsageWindow", "barWindowLabel", "setBarSourceWindow", "setLocalStatsEnabled", "selectBarProviders", "primaryLabel", "barTooltipText", "formatTimeUntil", "startFetch", "refreshProvider", "timeoutFetch", "savePluginSetting", "setUsageDisplayMode", "setNotificationsEnabled", "setZenBalanceThreshold", "displayPercent", "alertWindows", "alertState", "alertPrefs", "removeAlertReservation", "removeAlertReservationForProvider", "saveAlertState", "baselineAlertSource", "evaluateProviderAlerts", "startNextAlert", "finishAlert", "localDayBounds", "parseLocalStats", "ensureLocalStats", "invalidateLocalStatsForDay", "refreshLocalStats", "finishLocalStats", "localStatsMissingBinary", "localStatsNeedsUpgrade", "timeoutLocalStats"];
     for (const name of names) root[name] = vm.runInContext(`(${functionSource(name)})`, context);
     return root;
 }
@@ -783,4 +783,311 @@ test("process start detection uses the verified Process started signal", () => {
     assert.match(source, /onStarted:\s*root\.markFetchStarted\("opencode-go"\)/);
     assert.match(source, /onStarted:\s*root\.localStatsStarted\s*=\s*true/);
     assert.doesNotMatch(source, /onErrorOccurred:/);
+});
+
+test("family output keeps identities while masking account emails", () => {
+    const root = makeRoot();
+    const rows = [
+        { provider: "codex", usage: { primary: { usedPercent: 10 } } },
+        { provider: "cliproxyapi", usage: { accountProvider: "codex", accountId: "acct-b", authIndex: "auth-b", accountEmail: "alice@example.invalid", usage: { primary: { usedPercent: 20 } } } },
+        { provider: "cliproxyapi", usage: { accountProvider: "codex", accountId: "acct-a", authIndex: "auth-a", accountEmail: "alex@example.invalid", usage: { primary: { usedPercent: 30 } } } },
+        { provider: "cliproxyapi", usage: { accountProvider: "codex", accountId: "bad/id", authIndex: "auth-c", usage: { primary: { usedPercent: 40 } } } }
+    ];
+    root.fetchActive.codex = true;
+    root.pendingFetches = 1;
+    root.finishFetch("codex", 0, JSON.stringify(rows));
+    assert.deepEqual(Array.from(root.openaiProviders, item => item.sourceId), ["codex", "cliproxyapi:codex:acct-a", "cliproxyapi:codex:acct-b"]);
+    assert.equal(root.sourceIdOf(root.openaiProviders[0]), "codex");
+    assert.equal(root.sourceKind("cliproxyapi:codex:acct-a"), "codex");
+    assert.deepEqual(Array.from(root.openaiProviders.slice(1), item => item.accountLabel), ["al***@ex***", "al***@ex***"]);
+    assert.equal(root.sourceName(root.openaiProviders[1]), "Codex · al***@ex*** · 1");
+    assert.equal(root.sourceName(root.openaiProviders[2]), "Codex · al***@ex*** · 2");
+    assert.deepEqual(Array.from(root.normalizeFamilyOutput("claude", JSON.stringify([
+        { provider: "cliproxyapi", usage: { accountProvider: "claude", authIndex: "auth-a", accountEmail: "user@example.invalid", usage: { fiveHour: { usedPercent: 20 } } } },
+        { provider: "cliproxyapi", usage: { accountProvider: "claude", authIndex: "auth-b", accountEmail: "user@example.invalid", usage: { fiveHour: { usedPercent: 25 } } } }
+    ])), item => item.sourceId), ["cliproxyapi:claude:auth-a", "cliproxyapi:claude:auth-b"]);
+    assert.doesNotMatch(JSON.stringify(root.openaiProviders), /alice|alex|example\.invalid/);
+});
+
+test("masked account labels validate input and never retain raw addresses", () => {
+    const root = makeRoot();
+    const records = root.normalizeFamilyOutput("codex", JSON.stringify([
+        { provider: "cliproxyapi", usage: { accountProvider: "codex", accountId: "one", accountEmail: "a@example.invalid", usage: { primary: { usedPercent: 1 } } } },
+        { provider: "cliproxyapi", usage: { accountProvider: "codex", accountId: "unicode", accountEmail: "éclair@éxample.invalid", usage: { primary: { usedPercent: 2 } } } },
+        { provider: "cliproxyapi", usage: { accountProvider: "codex", accountId: "nested", usage: { accountEmail: "nested@example.invalid", primary: { usedPercent: 3 } } } },
+        { provider: "cliproxyapi", usage: { accountProvider: "codex", accountId: "bad-at", accountEmail: "a@@example.invalid", usage: { primary: { usedPercent: 4 } } } },
+        { provider: "cliproxyapi", usage: { accountProvider: "codex", accountId: "bad-space", accountEmail: "a b@example.invalid", usage: { primary: { usedPercent: 5 } } } },
+        { provider: "cliproxyapi", usage: { accountProvider: "codex", accountId: "bad-control", accountEmail: "a\u0001@example.invalid", usage: { primary: { usedPercent: 6 } } } },
+        { provider: "codex", usage: { accountEmail: "local@example.invalid", primary: { usedPercent: 7 } } },
+        { provider: "codex", usage: { primary: { usedPercent: 8 } } }
+    ]));
+    root.providers = records;
+    const labels = Object.fromEntries(records.map(item => [item.sourceId, item.accountLabel]));
+    assert.deepEqual(labels, {
+        codex: "lo***@ex***",
+        "cliproxyapi:codex:bad-at": "",
+        "cliproxyapi:codex:bad-control": "",
+        "cliproxyapi:codex:bad-space": "",
+        "cliproxyapi:codex:nested": "ne***@ex***",
+        "cliproxyapi:codex:one": "a***@ex***",
+        "cliproxyapi:codex:unicode": "éc***@éx***"
+    });
+    assert.equal(records.find(item => item.sourceId === "codex").usage.accountEmail, undefined);
+    assert.doesNotMatch(JSON.stringify(records), /nested@example|local@example|éxample\.invalid/);
+    assert.match(root.sourceName(records.find(item => item.sourceId === "codex")), /^Codex · lo\*\*\*@ex\*\*\*/);
+    assert.equal(root.sourceName(records.find(item => item.sourceId === "cliproxyapi:codex:bad-at")), "Codex · Proxy 1");
+});
+
+test("family fetch exit one updates valid accounts and retains missing accounts as stale", () => {
+    const root = makeRoot();
+    root.parseProviderOutput("codex", JSON.stringify([
+        { provider: "codex", usage: { primary: { usedPercent: 10 } } },
+        { provider: "cliproxyapi", usage: { accountProvider: "codex", accountId: "kept", authIndex: "x", usage: { primary: { usedPercent: 20 } } } },
+        { provider: "cliproxyapi", usage: { accountProvider: "codex", accountId: "stale", authIndex: "y", usage: { primary: { usedPercent: 30 } } } }
+    ]));
+    const oldTimestamp = root.providerUpdatedAt("cliproxyapi:codex:stale");
+    root.fetchActive.codex = true;
+    root.pendingFetches = 1;
+    root.finishFetch("codex", 1, JSON.stringify([
+        { provider: "codex", usage: { primary: { usedPercent: 11 } } },
+        { provider: "cliproxyapi", usage: { accountProvider: "codex", accountId: "kept", authIndex: "x", usage: { primary: { usedPercent: 21 } } } }
+    ]));
+    assert.deepEqual(Array.from(root.openaiProviders, item => item.sourceId), ["codex", "cliproxyapi:codex:kept", "cliproxyapi:codex:stale"]);
+    assert.equal(root.openaiProviders[1].usage.primary.usedPercent, 21);
+    assert.equal(root.providerUpdatedAt("cliproxyapi:codex:stale"), oldTimestamp);
+    assert.equal(root.sourceIsStale("cliproxyapi:codex:stale"), true);
+    assert.equal(root.sourceIsStale("cliproxyapi:codex:kept"), false);
+    assert.equal(root.providerError("codex"), "Some accounts could not be refreshed");
+    root.fetchActive.codex = true;
+    root.pendingFetches = 1;
+    root.finishFetch("codex", 0, JSON.stringify([{ provider: "codex", usage: { primary: { usedPercent: 12 } } }]));
+    assert.deepEqual(Array.from(root.openaiProviders, item => item.sourceId), ["codex"]);
+});
+
+test("partial output leaves an omitted local account timestamp unchanged", () => {
+    const root = makeRoot();
+    root.providerStale = {};
+    root.parseProviderOutput("codex", JSON.stringify([
+        { provider: "codex", usage: { primary: { usedPercent: 10 } } },
+        { provider: "cliproxyapi", usage: { accountProvider: "codex", accountId: "fresh-proxy", authIndex: "auth-a", usage: { primary: { usedPercent: 20 } } } }
+    ]));
+    root.providerTimes.codex = 1000;
+    root.providerTimes["cliproxyapi:codex:fresh-proxy"] = 1000;
+    root.clockNow = 61000;
+    const localTimestamp = root.providerUpdatedAt("codex");
+    const localAge = root.sourceUpdatedLabel("codex");
+    root.fetchActive.codex = true;
+    root.pendingFetches = 1;
+    root.finishFetch("codex", 1, JSON.stringify([
+        { provider: "cliproxyapi", usage: { accountProvider: "codex", accountId: "fresh-proxy", authIndex: "auth-a", usage: { primary: { usedPercent: 21 } } } }
+    ]));
+
+    assert.equal(root.providerUpdatedAt("codex"), localTimestamp);
+    assert.equal(root.sourceUpdatedLabel("codex"), localAge);
+    assert.ok(root.providerUpdatedAt("cliproxyapi:codex:fresh-proxy") > 1000);
+    assert.equal(root.sourceIsStale("codex"), true);
+    assert.equal(root.sourceError("codex"), "Some accounts could not be refreshed");
+    assert.equal(root.sourceError("cliproxyapi:codex:fresh-proxy"), "");
+});
+
+test("unsupported accounts stay visible as stale and make a successful process partial", () => {
+    const root = makeRoot();
+    root.parseProviderOutput("codex", JSON.stringify([
+        { provider: "codex", usage: { primary: { usedPercent: 10 } } },
+        { provider: "cliproxyapi", usage: { accountProvider: "codex", accountId: "old-proxy", authIndex: "auth-a", usage: { primary: { usedPercent: 20 } } } }
+    ]));
+    const oldProxy = root.openaiProviders.find(item => item.sourceId === "cliproxyapi:codex:old-proxy");
+    const oldTimestamp = root.providerUpdatedAt(oldProxy.sourceId);
+    const missingProxy = { provider: "codex", sourceId: "cliproxyapi:codex:missing-proxy", origin: "cliproxyapi", usage: { primary: { usedPercent: 30 } } };
+    root.openaiProviders = root.openaiProviders.concat([missingProxy]);
+    root.providerTimes[missingProxy.sourceId] = oldTimestamp;
+    root.mergeProviders();
+    root.fetchActive.codex = true;
+    root.pendingFetches = 1;
+    root.finishFetch("codex", 0, JSON.stringify([
+        { provider: "codex", usage: { primary: { usedPercent: 11 } } },
+        { provider: "cliproxyapi", usage: { accountProvider: "codex", accountId: "old-proxy", authIndex: "auth-a", usage: { plan: "credits-only" } } },
+        { provider: "cliproxyapi", usage: { accountProvider: "codex", accountId: "new-unsupported", authIndex: "auth-b", usage: { credits: 8 } } }
+    ]));
+
+    assert.equal(root.openaiProviders.find(item => item.sourceId === oldProxy.sourceId), oldProxy);
+    assert.equal(root.providerUpdatedAt(oldProxy.sourceId), oldTimestamp);
+    assert.equal(root.sourceIsStale(oldProxy.sourceId), true);
+    assert.equal(root.sourceError(oldProxy.sourceId), "Some accounts could not be refreshed");
+    assert.ok(root.openaiProviders.some(item => item.sourceId === missingProxy.sourceId));
+    assert.equal(root.sourceIsStale(missingProxy.sourceId), true);
+    assert.equal(root.providerStale["cliproxyapi:codex:new-unsupported"], true);
+    assert.equal(root.providerError("codex"), "Some accounts could not be refreshed");
+    assert.equal(root.openaiProviders.find(item => item.sourceId === "codex").usage.primary.usedPercent, 11);
+});
+
+test("family failure retains every card, keeps timestamps, and marks them stale immediately", () => {
+    const root = makeRoot();
+    root.parseProviderOutput("claude", JSON.stringify([
+        { provider: "claude", usage: { fiveHour: { usedPercent: 18 } } },
+        { provider: "cliproxyapi", usage: { accountProvider: "claude", authIndex: "proxy-a", usage: { fiveHour: { usedPercent: 28 } } } }
+    ]));
+    root.providerStale = {};
+    const oldTimestamp = root.providerUpdatedAt("claude");
+    root.providerTimes.claude = 1200;
+    root.providerTimes["cliproxyapi:claude:proxy-a"] = 1300;
+    const before = root.claudeProviders.slice();
+    root.fetchActive.claude = true;
+    root.pendingFetches = 1;
+    root.fetchStarted.claude = true;
+    root.finishFetch("claude", 1, "", "");
+
+    assert.deepEqual(root.claudeProviders, before);
+    assert.equal(root.providerUpdatedAt("claude"), 1200);
+    assert.equal(root.providerUpdatedAt("cliproxyapi:claude:proxy-a"), 1300);
+    assert.equal(root.sourceIsStale("claude"), true);
+    assert.equal(root.sourceIsStale("cliproxyapi:claude:proxy-a"), true);
+    assert.equal(root.providerError("claude"), "Provider request failed");
+});
+
+test("bar tooltip reports only stale sources during partial output and all sources after failure", () => {
+    const root = makeRoot();
+    const local = { provider: "codex", sourceId: "codex", origin: "local", usage: { primary: { usedPercent: 15 } } };
+    const proxy = { provider: "codex", sourceId: "cliproxyapi:codex:proxy-a", origin: "cliproxyapi", usage: { primary: { usedPercent: 25 } } };
+    root.providers = [local, proxy];
+    root.barProviders = [local, proxy];
+    root.providerErrors.codex = "partial";
+    root.providerStale = { codex: true };
+    let tooltip = root.barTooltipText();
+    assert.match(tooltip.split("\n")[0], /Some accounts could not be refreshed/);
+    assert.doesNotMatch(tooltip.split("\n")[1], /Some accounts could not be refreshed/);
+
+    root.providerErrors.codex = "unknown";
+    root.providerStale = { codex: true, "cliproxyapi:codex:proxy-a": true };
+    tooltip = root.barTooltipText();
+    assert.equal((tooltip.match(/Provider request failed/g) || []).length, 2);
+});
+
+test("malformed family output retains data and safe diagnostics", () => {
+    const root = makeRoot();
+    root.parseProviderOutput("claude", JSON.stringify([{ provider: "claude", usage: { fiveHour: { usedPercent: 20 } } }]));
+    const previous = root.claudeProviders;
+    const oldTimestamp = root.providerUpdatedAt("claude");
+    root.fetchActive.claude = true;
+    root.pendingFetches = 1;
+    root.fetchStderr.claude = "private account user@example.invalid";
+    root.finishFetch("claude", 1, "not-json");
+    assert.equal(root.claudeProviders, previous);
+    assert.equal(root.providerUpdatedAt("claude"), oldTimestamp);
+    assert.equal(root.sourceIsStale("claude"), true);
+    assert.equal(root.providerError("claude"), "Provider returned invalid data");
+    assert.doesNotMatch(root.providerError("claude") + root.sourceHint("claude"), /example\.invalid|private/);
+});
+
+test("proxy pins and quota windows remain independent from local settings", () => {
+    const root = makeRoot();
+    const proxyId = "cliproxyapi:codex:acct-1";
+    const providers = [
+        { provider: "codex", sourceId: "codex", origin: "local", usage: { primary: { usedPercent: 10 }, secondary: { usedPercent: 20 } } },
+        { provider: "codex", sourceId: proxyId, origin: "cliproxyapi", usage: { primary: { usedPercent: 30 }, secondary: { usedPercent: 40 } } }
+    ];
+    root.providers = providers;
+    root.pluginService = { savePluginData: (_id, key, value) => { root[key] = value; return true; } };
+    root.barSources = root.normalizeBarSources(["codex", proxyId]);
+    assert.deepEqual(Array.from(root.selectBarProviders(providers, root.barSources), item => root.sourceIdOf(item)), ["codex", proxyId]);
+    assert.equal(root.setSourceWindow(providers[1], "secondary"), true);
+    assert.equal(root.selectedWindowKey(proxyId), "secondary");
+    assert.equal(root.selectedWindowKey("codex"), "primary");
+    assert.equal(root.sourceName(providers[1]), "Codex · Proxy 1");
+});
+
+test("proxy bar values, tooltips, and colors use each account's selected window", () => {
+    const root = makeRoot();
+    root.usageDisplayMode = "used";
+    const first = { provider: "codex", sourceId: "cliproxyapi:codex:acct-a", origin: "cliproxyapi", usage: { primary: { usedPercent: 35 }, secondary: { usedPercent: 92 } } };
+    const second = { provider: "codex", sourceId: "cliproxyapi:codex:acct-b", origin: "cliproxyapi", usage: { primary: { usedPercent: 88 }, secondary: { usedPercent: 21 } } };
+    root.providers = [first, second];
+    root.barProviders = [first, second];
+    root.barSourceWindows = root.normalizeBarSourceWindows({ [first.sourceId]: "secondary", [second.sourceId]: "secondary" });
+    root.providerTimes[first.sourceId] = root.clockNow;
+    root.providerTimes[second.sourceId] = root.clockNow;
+
+    assert.equal(root.barProviderText(first), "92%");
+    assert.equal(root.barProviderText(second), "21%");
+    assert.equal(root.barWindowLabel(first.sourceId, first.usage), "Weekly");
+    assert.equal(root.getUsageColor(root.sourceUsageWindow(first).usedPercent), "error");
+    assert.equal(root.getUsageColor(root.sourceUsageWindow(second).usedPercent), "success");
+    const tooltip = root.barTooltipText();
+    assert.match(tooltip, /Codex · Proxy 1: Weekly \(used\) 92%/);
+    assert.match(tooltip, /Codex · Proxy 2: Weekly \(used\) 21%/);
+});
+
+test("bar source normalization and source validation share the same proxy ID rule", () => {
+    const root = makeRoot();
+    const valid = "cliproxyapi:claude:" + "a".repeat(140);
+    const invalid = "cliproxyapi:claude:bad/id";
+    assert.equal(root.validSourceId(valid), true);
+    assert.equal(root.validSourceId(invalid), false);
+    assert.deepEqual(JSON.parse(JSON.stringify(root.normalizeBarSources([valid, invalid]))), [valid]);
+});
+
+test("long auth indexes survive parsing, pinning, and independent window settings", () => {
+    const root = makeRoot();
+    const authIndex = "auth_" + "x".repeat(140);
+    const sourceId = "cliproxyapi:claude:" + authIndex;
+    const item = root.normalizeFamilyOutput("claude", JSON.stringify([
+        { provider: "cliproxyapi", usage: { accountProvider: "claude", authIndex, usage: { fiveHour: { usedPercent: 31 }, sevenDay: { usedPercent: 62 } } } }
+    ]))[0];
+    assert.equal(item.sourceId, sourceId);
+    assert.deepEqual(JSON.parse(JSON.stringify(root.normalizeBarSources([sourceId]))), [sourceId]);
+    root.providers = [item];
+    root.pluginService = { savePluginData: (_id, key, value) => { root[key] = value; return true; } };
+    root.barSources = root.normalizeBarSources([sourceId]);
+    assert.equal(root.setSourceWindow(item, "sevenDay"), true);
+    assert.equal(root.selectedWindowKey(sourceId), "sevenDay");
+});
+
+test("family fetch command stays a single provider-family request", () => {
+    const root = makeRoot();
+    assert.equal(root.refreshProvider("codex", true), true);
+    assert.deepEqual(JSON.parse(JSON.stringify(root.procOpenai.command)), ["opentracker", "fetch", "codex", "--force"]);
+    assert.equal(root.pendingFetches, 1);
+});
+
+test("full alert queue preserves the fifth account latch for a later refresh", () => {
+    const root = makeRoot();
+    let state = null;
+    root.notificationsEnabled = true;
+    root.pluginService = { loadPluginState: () => state, savePluginState: (_id, _key, next) => { state = structuredClone(next); } };
+    const rows = percent => Array.from({ length: 5 }, (_, index) => ({
+        provider: "cliproxyapi",
+        usage: { accountProvider: "codex", accountId: "acct-" + (index + 1), authIndex: "auth-" + (index + 1), usage: { primary: { usedPercent: percent } } }
+    }));
+    root.parseProviderOutput("codex", JSON.stringify(rows(0)));
+    root.parseProviderOutput("codex", JSON.stringify(rows(96)));
+    const fifthId = "cliproxyapi:codex:acct-5";
+    assert.equal(root.alertProcessBusy, true);
+    assert.equal(root.alertQueue.length, 3);
+    assert.equal(state.sources[fifthId].windows[fifthId + ":primary"].used, 0);
+    assert.equal(state.sources[fifthId].windows[fifthId + ":primary"].sent95, false);
+
+    for (let i = 0; i < 4; i++) root.finishAlert(0, false);
+    assert.equal(root.alertProcessBusy, false);
+    assert.equal(root.alertQueue.length, 0);
+    root.parseProviderOutput("codex", JSON.stringify(rows(96)));
+    assert.equal(root.alertActiveRecord.provider, fifthId);
+    assert.match(root.alertActiveRecord.body, /Codex proxy account/);
+});
+
+test("proxy alert state is keyed by source and notifications omit account identifiers", () => {
+    const root = makeRoot();
+    let state = null;
+    root.notificationsEnabled = true;
+    root.pluginService = { loadPluginState: () => state, savePluginState: (_id, _key, next) => { state = structuredClone(next); } };
+    const output = percent => JSON.stringify([
+        { provider: "cliproxyapi", usage: { accountProvider: "codex", accountId: "acct-one", authIndex: "auth-one", accountEmail: "user@example.invalid", usage: { primary: { usedPercent: percent } } } },
+        { provider: "cliproxyapi", usage: { accountProvider: "codex", accountId: "acct-two", authIndex: "auth-two", accountEmail: "user@example.invalid", usage: { primary: { usedPercent: percent } } } }
+    ]);
+    root.parseProviderOutput("codex", output(0));
+    root.parseProviderOutput("codex", output(96));
+    assert.ok(state.sources["cliproxyapi:codex:acct-one"]);
+    assert.ok(state.sources["cliproxyapi:codex:acct-two"]);
+    const notifications = [root.alertActiveRecord, ...root.alertQueue].filter(Boolean).map(record => record.body).join("\n");
+    assert.match(notifications, /Codex proxy account/);
+    assert.doesNotMatch(notifications, /acct-one|acct-two|auth-one|auth-two|example\.invalid/);
 });

@@ -53,6 +53,14 @@ Enable the `OpenTrackerBar` plugin in DankMaterialShell settings. Click the widg
 
 Provider authentication and cookies are handled by opentracker, not by this plugin.
 
+### CLIProxyAPI accounts
+
+With a compatible `opentracker` build and CLIProxyAPI configured, the existing Codex and Claude tabs also show proxy accounts returned by `opentracker fetch codex` and `opentracker fetch claude`. Each account can be pinned and configured independently; existing pins do not change. Refreshing an account refreshes its entire provider family, as the CLI does not provide a per-account fetch.
+
+The CLI handles Codex deduplication. If a fetch partially succeeds, successful accounts are updated and the widget warns that some accounts could not be refreshed. Previous data for missing accounts remains available until a complete successful refresh, with its original update time.
+
+Account identifiers are retained in local DMS plugin settings and alert state to keep pins and alert history associated with the correct account. When an email is available, the widget shows only a masked hint in account labels; it does not store the full email in settings or alert state. Proxy credentials and configuration remain managed by opentracker.
+
 ### Display and notifications
 
 Open the preferences section in the widget popout to choose **Used** or **Remaining**. The setting applies to quota percentages and progress bars, not to the Zen dollar balance. Warning colors always reflect usage: 5% remaining is still a high-usage warning.
