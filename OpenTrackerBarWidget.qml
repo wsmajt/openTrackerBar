@@ -46,6 +46,10 @@ PluginComponent {
     readonly property string usageDisplayMode: root.pluginData && root.pluginData.usageDisplayMode === "remaining" ? "remaining" : "used"
     readonly property var barSourceWindows: root.normalizeBarSourceWindows(root.pluginData ? root.pluginData.barSourceWindows : null)
     readonly property bool notificationsEnabled: root.pluginData && root.pluginData.notificationsEnabled === true
+    readonly property string emailMaskMode: root.pluginData && root.pluginData.emailMaskMode === "domain" ? "domain" : "prefix"
+    readonly property string emailMaskFill: root.pluginData && root.pluginData.emailMaskFill === "•" ? "•" : "*"
+    readonly property int emailMaskCount: root.pluginData && [1, 2, 3].indexOf(root.pluginData.emailMaskCount) !== -1 ? root.pluginData.emailMaskCount : 3
+    readonly property bool showBarLabels: !root.pluginData || root.pluginData.showBarLabels !== false
     readonly property real zenBalanceThreshold: {
         var value = root.pluginData ? root.validNumber(root.pluginData.zenBalanceThreshold) : null;
         return value !== null && value >= 0 ? value : 1;
@@ -172,13 +176,29 @@ PluginComponent {
     function validSourceId(id) { return typeof id === "string" && /^cliproxyapi:(codex|claude):[A-Za-z0-9._-]+$/.test(id); }
     function sourceIdOf(item) { return item && typeof item.sourceId === "string" && item.sourceId ? item.sourceId : item ? item.provider : ""; }
     function sourceKind(id) { return typeof id === "string" && id.indexOf("cliproxyapi:") === 0 ? id.split(":")[1] : id; }
-    function maskAccountEmail(value) {
-        if (typeof value !== "string" || /[\s\u0000-\u001f\u007f]/.test(value)) return "";
+    function maskAccountEmail(value, mode, fill, count) {
+        var parts = root.emailParts(value);
+        return parts ? root.maskEmailParts(parts, mode, fill, count) : "";
+    }
+    function emailParts(value) {
+        if (typeof value !== "string" || /[\s\u0000-\u001f\u007f]/.test(value)) return null;
         var at = value.indexOf("@");
-        if (at <= 0 || at !== value.lastIndexOf("@") || at === value.length - 1) return "";
+        if (at <= 0 || at !== value.lastIndexOf("@") || at === value.length - 1) return null;
         var local = Array.from(value.slice(0, at)), domain = Array.from(value.slice(at + 1));
-        if (!local.length || !domain.length) return "";
-        return local.slice(0, 2).join("") + "***@" + domain.slice(0, 2).join("") + "***";
+        var domainText = domain.join("");
+        if (!local.length || !domain.length || ["/", "\\", ":", "?", "#", "[", "]", "@", "%", "=", "<", ">", "\"", "'", ",", ";", "(", ")", "_"].some(function (character) { return domainText.indexOf(character) !== -1; }) || domain[0] === "." || domain[domain.length - 1] === "." || domainText.indexOf("..") !== -1) return null;
+        return { prefix: local.slice(0, Math.min(2, local.length - 1)).join(""), domain: domain.join("") };
+    }
+    function maskEmailParts(parts, mode, fill, count) {
+        if (!parts || typeof parts.prefix !== "string" || typeof parts.domain !== "string") return "";
+        mode = mode === undefined ? root.emailMaskMode : mode;
+        fill = fill === undefined ? root.emailMaskFill : fill;
+        count = count === undefined ? root.emailMaskCount : count;
+        if (mode !== "prefix" && mode !== "domain") mode = "prefix";
+        if (fill !== "*" && fill !== "•") fill = "*";
+        if ([1, 2, 3].indexOf(count) === -1) count = 3;
+        var mask = fill.repeat(count);
+        return mode === "domain" ? mask + "@" + parts.domain : parts.prefix + mask + "@" + Array.from(parts.domain).slice(0, 2).join("") + mask;
     }
     function safeUsage(value) {
         var result = {};
@@ -188,10 +208,11 @@ PluginComponent {
     function sourceName(item) {
         if (!item) return "";
         var kind = root.sourceKind(root.sourceIdOf(item));
-        if (item.accountLabel) {
-            var peersWithLabel = root.providers.filter(function (entry) { return entry && entry.provider === kind && entry.accountLabel === item.accountLabel; }).slice().sort(function (a, b) { return root.sourceIdOf(a) < root.sourceIdOf(b) ? -1 : 1; });
+        var label = item.sourceEmailParts ? root.maskEmailParts(item.sourceEmailParts) : item.accountLabel;
+        if (label) {
+            var peersWithLabel = root.providers.filter(function (entry) { return entry && entry.provider === kind && (entry.sourceEmailParts ? root.maskEmailParts(entry.sourceEmailParts) : entry.accountLabel) === label; }).slice().sort(function (a, b) { return root.sourceIdOf(a) < root.sourceIdOf(b) ? -1 : 1; });
             var labelIndex = peersWithLabel.findIndex(function (entry) { return root.sourceIdOf(entry) === root.sourceIdOf(item); });
-            return root.formatProviderName(kind) + " · " + item.accountLabel + (peersWithLabel.length > 1 ? " · " + (labelIndex + 1) : "");
+            return root.formatProviderName(kind) + " · " + label + (peersWithLabel.length > 1 ? " · " + (labelIndex + 1) : "");
         }
         if (item.origin !== "cliproxyapi") return root.formatProviderName(item.provider);
         var id = root.sourceIdOf(item), kind = root.sourceKind(id), peers = root.providers.filter(function (entry) { return entry && entry.origin === "cliproxyapi" && root.sourceKind(root.sourceIdOf(entry)) === kind; }).slice().sort(function (a, b) { return root.sourceIdOf(a) < root.sourceIdOf(b) ? -1 : 1; });
@@ -267,6 +288,22 @@ PluginComponent {
 
     function setNotificationsEnabled(enabled) {
         return typeof enabled === "boolean" && root.savePluginSetting("notificationsEnabled", enabled);
+    }
+
+    function setEmailMaskMode(mode) {
+        return (mode === "prefix" || mode === "domain") && root.savePluginSetting("emailMaskMode", mode);
+    }
+
+    function setEmailMaskFill(fill) {
+        return (fill === "*" || fill === "•") && root.savePluginSetting("emailMaskFill", fill);
+    }
+
+    function setEmailMaskCount(count) {
+        return typeof count === "number" && [1, 2, 3].indexOf(count) !== -1 && root.savePluginSetting("emailMaskCount", count);
+    }
+
+    function setShowBarLabels(enabled) {
+        return typeof enabled === "boolean" && root.savePluginSetting("showBarLabels", enabled);
     }
 
     function setZenBalanceThreshold(value) {
@@ -545,14 +582,14 @@ PluginComponent {
         var hasInvalid = false;
         data.forEach(function (item) {
             if (!item || typeof item !== "object" || Array.isArray(item)) { hasInvalid = true; return; }
-            var kind, sourceId, origin, usage, accountLabel = "";
-            if (item.provider === target) { kind = target; sourceId = target; origin = "local"; accountLabel = root.maskAccountEmail(item.usage && item.usage.accountEmail); usage = root.safeUsage(item.usage); }
+            var kind, sourceId, origin, usage, accountLabel = "", sourceEmailParts = null;
+            if (item.provider === target) { kind = target; sourceId = target; origin = "local"; sourceEmailParts = root.emailParts(item.usage && item.usage.accountEmail); accountLabel = sourceEmailParts ? root.maskEmailParts(sourceEmailParts, "prefix", "*", 3) : ""; usage = root.safeUsage(item.usage); }
             else if (item.provider === "cliproxyapi" && item.usage && item.usage.accountProvider === target) {
                 kind = target;
                 var identity = target === "codex" ? item.usage.accountId || item.usage.authIndex : item.usage.authIndex;
                 sourceId = typeof identity === "string" ? "cliproxyapi:" + target + ":" + identity : "";
                 if (!root.validSourceId(sourceId)) { hasInvalid = true; return; }
-                origin = "cliproxyapi"; accountLabel = root.maskAccountEmail(item.usage.accountEmail || (item.usage.usage && item.usage.usage.accountEmail)); usage = root.safeUsage(item.usage.usage);
+                origin = "cliproxyapi"; sourceEmailParts = root.emailParts(item.usage.accountEmail || (item.usage.usage && item.usage.usage.accountEmail)); accountLabel = sourceEmailParts ? root.maskEmailParts(sourceEmailParts, "prefix", "*", 3) : ""; usage = root.safeUsage(item.usage.usage);
             } else if (item.provider === "cliproxyapi") { hasInvalid = true; return; }
             else return;
             if (item.error || !usage || typeof usage !== "object" || Array.isArray(usage) || root.availableBarWindows(kind, usage).length === 0) {
@@ -560,7 +597,7 @@ PluginComponent {
                 if (sourceId) invalidIds[sourceId] = true;
                 return;
             }
-            normalized.push({ provider: kind, sourceId: sourceId, origin: origin, usage: usage, accountLabel: accountLabel });
+            normalized.push({ provider: kind, sourceId: sourceId, origin: origin, usage: usage, accountLabel: accountLabel, sourceEmailParts: sourceEmailParts });
         });
         var seen = ({});
         normalized = normalized.filter(function (entry) { if (seen[entry.sourceId]) return false; seen[entry.sourceId] = true; return true; });
@@ -1286,6 +1323,7 @@ PluginComponent {
 
                         StyledText {
                             text: barProviderDelegate.modelData.provider === "codex" ? (barProviderDelegate.modelData.accountLabel ? root.sourceName(barProviderDelegate.modelData).replace(/^Codex · /, "") : "Codex") : barProviderDelegate.modelData.origin === "cliproxyapi" ? root.sourceName(barProviderDelegate.modelData) : barProviderDelegate.modelData.provider === "opencode-zen" ? "Zen" : barProviderDelegate.modelData.provider === "opencode-go" ? "Go" : root.formatProviderName(barProviderDelegate.modelData.provider)
+                            visible: root.showBarLabels
                             font.pixelSize: Theme.fontSizeSmall
                             font.weight: Font.Medium
                             color: Theme.surfaceText
@@ -1426,7 +1464,16 @@ PluginComponent {
             Item {
                 id: contentWrapper
                 width: parent.width
-                implicitHeight: mainCol.implicitHeight
+                readonly property real popoutBodyBudget: popup.parentPopout && popup.parentPopout.maxBodyHeight > 0
+                    ? Math.max(0, popup.parentPopout.maxBodyHeight - PopoutMetrics.contentPadding * 2)
+                    : popup.parentPopout && popup.parentPopout.screenHeight > 0
+                        ? Math.max(0, popup.parentPopout.screenHeight - PopoutMetrics.contentPadding * 2)
+                        : 0
+                readonly property real preferencesViewportHeight: Math.max(0, Math.min(preferencesColumn.implicitHeight + Theme.spacingM * 2,
+                    popoutBodyBudget > 0 ? popoutBodyBudget - Theme.buttonHeightXS - Theme.spacingS : preferencesColumn.implicitHeight + Theme.spacingM * 2))
+                implicitHeight: preferencesExpanded && popoutBodyBudget > 0
+                    ? Math.min(mainCol.implicitHeight, popoutBodyBudget)
+                    : mainCol.implicitHeight
                 property bool preferencesExpanded: false
                 property string zenThresholdDraft: "1.00"
                 property bool zenThresholdInvalid: false
@@ -1535,12 +1582,12 @@ PluginComponent {
 
                         DankActionButton {
                             id: preferencesButton
-                            iconName: "tune"
+                            iconName: contentWrapper.preferencesExpanded ? "close" : "tune"
                             iconSize: Theme.iconSizeSmall
                             buttonSize: Theme.buttonHeightXS
                             iconColor: contentWrapper.preferencesExpanded ? Theme.primary : Theme.surfaceText
                             backgroundColor: Theme.surfaceContainerHigh
-                            tooltipText: contentWrapper.preferencesExpanded ? "Hide preferences" : "Show preferences"
+                            tooltipText: contentWrapper.preferencesExpanded ? "Close preferences" : "Show preferences"
                             Accessible.name: tooltipText
                             onClicked: contentWrapper.preferencesExpanded = !contentWrapper.preferencesExpanded
                         }
@@ -1549,24 +1596,48 @@ PluginComponent {
                     StyledRect {
                         width: parent.width
                         visible: contentWrapper.preferencesExpanded
-                        implicitHeight: visible ? preferencesColumn.implicitHeight + Theme.spacingM * 2 : 0
+                        implicitHeight: visible ? contentWrapper.preferencesViewportHeight : 0
                         height: implicitHeight
                         radius: Theme.cornerRadius
                         color: Theme.surfaceContainerHigh
 
-                        Column {
-                            id: preferencesColumn
-                            anchors.left: parent.left
-                            anchors.right: parent.right
-                            anchors.top: parent.top
+                        DCommonWidgets.DFlickable {
+                            id: preferencesFlickable
+                            anchors.fill: parent
                             anchors.margins: Theme.spacingM
-                            spacing: Theme.spacingS
+                            clip: true
+                            contentWidth: width
+                            contentHeight: preferencesColumn.implicitHeight
+                            showScrollBar: true
+                            fadeEdges: true
 
-                            StyledText {
-                                text: "Preferences"
-                                font.pixelSize: Theme.fontSizeMedium
-                                font.weight: Font.Medium
-                                color: Theme.surfaceText
+                            Column {
+                                id: preferencesColumn
+                                width: preferencesFlickable.width
+                                spacing: Theme.spacingS
+
+                            Row {
+                                width: parent.width
+                                height: Theme.buttonHeightXS
+                                StyledText {
+                                    anchors.left: parent.left
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    text: "Preferences"
+                                    font.pixelSize: Theme.fontSizeMedium
+                                    font.weight: Font.Medium
+                                    color: Theme.surfaceText
+                                }
+                                DankActionButton {
+                                    anchors.right: parent.right
+                                    iconName: "arrow_back"
+                                    iconSize: Theme.iconSizeSmall
+                                    buttonSize: Theme.buttonHeightXS
+                                    iconColor: Theme.surfaceText
+                                    backgroundColor: "transparent"
+                                    tooltipText: "Done"
+                                    Accessible.name: "Done with preferences"
+                                    onClicked: contentWrapper.preferencesExpanded = false
+                                }
                             }
 
                             Column {
@@ -1590,6 +1661,97 @@ PluginComponent {
                                 }
                             }
 
+                            Column {
+                                width: parent.width
+                                spacing: Theme.spacingXS
+
+                                StyledText {
+                                    text: "Email labels"
+                                    font.pixelSize: Theme.fontSizeSmall
+                                    font.weight: Font.Medium
+                                    color: Theme.surfaceText
+                                }
+
+                                Flow {
+                                    width: parent.width
+                                    spacing: Theme.spacingS
+
+                                    Column {
+                                        width: parent.width
+                                        spacing: Theme.spacingXS
+                                        StyledText {
+                                            text: "Show"
+                                            font.pixelSize: Theme.fontSizeSmall
+                                            color: Theme.surfaceVariantText
+                                        }
+                                        DCommonWidgets.DFilterChips {
+                                            width: parent.width
+                                            model: ["Prefix", "Domain"]
+                                            currentIndex: root.emailMaskMode === "domain" ? 1 : 0
+                                            showCheck: false
+                                            showCounts: false
+                                            chipHeight: Theme.buttonHeightXS
+                                            chipPadding: Theme.spacingM
+                                            Accessible.name: "Email label masking"
+                                            onSelectionChanged: index => root.setEmailMaskMode(index === 1 ? "domain" : "prefix")
+                                        }
+                                    }
+
+                                    Column {
+                                        width: parent.width
+                                        spacing: Theme.spacingXS
+                                        StyledText {
+                                            text: "Fill"
+                                            font.pixelSize: Theme.fontSizeSmall
+                                            color: Theme.surfaceVariantText
+                                        }
+                                        DCommonWidgets.DFilterChips {
+                                            width: parent.width
+                                            model: ["*", "•"]
+                                            currentIndex: root.emailMaskFill === "•" ? 1 : 0
+                                            showCheck: false
+                                            showCounts: false
+                                            chipHeight: Theme.buttonHeightXS
+                                            chipPadding: Theme.spacingM
+                                            Accessible.name: "Email mask fill character"
+                                            onSelectionChanged: index => root.setEmailMaskFill(index === 1 ? "•" : "*")
+                                        }
+                                    }
+
+                                    Column {
+                                        width: parent.width
+                                        spacing: Theme.spacingXS
+                                        StyledText {
+                                            text: "Length"
+                                            font.pixelSize: Theme.fontSizeSmall
+                                            color: Theme.surfaceVariantText
+                                        }
+                                        DCommonWidgets.DFilterChips {
+                                            width: parent.width
+                                            model: ["1", "2", "3"]
+                                            currentIndex: root.emailMaskCount - 1
+                                            showCheck: false
+                                            showCounts: false
+                                            chipHeight: Theme.buttonHeightXS
+                                            chipPadding: Theme.spacingM
+                                            Accessible.name: "Email mask length"
+                                            onSelectionChanged: index => root.setEmailMaskCount(index + 1)
+                                        }
+                                    }
+                                }
+
+                                StyledText {
+                                    width: parent.width
+                                    text: root.emailMaskMode === "domain"
+                                        ? "Domain only. Example: " + root.emailMaskFill.repeat(root.emailMaskCount) + "@example.com"
+                                        : "First 2 characters of name and domain. Example: al" + root.emailMaskFill.repeat(root.emailMaskCount) + "@ex" + root.emailMaskFill.repeat(root.emailMaskCount)
+                                    font.pixelSize: Theme.fontSizeSmall
+                                    color: Theme.surfaceVariantText
+                                    wrapMode: Text.WordWrap
+                                    Accessible.name: text
+                                }
+                            }
+
                             DCommonWidgets.DToggle {
                                 width: parent.width
                                 checked: root.notificationsEnabled
@@ -1598,6 +1760,16 @@ PluginComponent {
                                 descriptionColor: Theme.surfaceVariantText
                                 Accessible.name: "Usage notifications"
                                 onToggled: value => root.setNotificationsEnabled(value)
+                            }
+
+                            DCommonWidgets.DToggle {
+                                width: parent.width
+                                checked: root.showBarLabels
+                                text: "Show labels in bar"
+                                description: "When off, only icons and values are shown"
+                                descriptionColor: Theme.surfaceVariantText
+                                Accessible.name: "Show labels in bar"
+                                onToggled: value => root.setShowBarLabels(value)
                             }
 
                             DCommonWidgets.DToggle {
@@ -1639,17 +1811,23 @@ PluginComponent {
                                     }
                                     onEditingFinished: contentWrapper.commitZenThreshold()
                                     onFocusStateChanged: hasFocus => {
-                                        if (!hasFocus)
+                                        if (hasFocus) {
+                                            var fieldTop = zenThresholdField.mapToItem(preferencesFlickable.contentItem, 0, 0).y;
+                                            preferencesFlickable.revealRange(fieldTop, fieldTop + zenThresholdField.height);
+                                        } else {
                                             contentWrapper.commitZenThreshold();
+                                        }
                                     }
                                     Accessible.name: "Zen low-balance threshold in dollars"
                                 }
                             }
                         }
                     }
+                    }
 
                     Row {
                         id: providerTabs
+                        visible: !contentWrapper.preferencesExpanded
                         width: parent.width
                         spacing: Theme.spacingXS
 
@@ -1722,7 +1900,7 @@ PluginComponent {
                         readonly property string family: root.activeTab === "openai" ? "codex" : "claude"
                         readonly property bool partialFailure: root.providerErrors[family] === "partial"
                         readonly property bool fullFailure: root.providerError(family) !== "" && !partialFailure
-                        visible: root.activeTab !== "opencode" && root.currentProviders().length > 0 && (partialFailure || fullFailure)
+                        visible: !contentWrapper.preferencesExpanded && root.activeTab !== "opencode" && root.currentProviders().length > 0 && (partialFailure || fullFailure)
                         height: Math.max(partialMessage.implicitHeight, partialActions.implicitHeight) + Theme.spacingS * 2
                         radius: Theme.cornerRadius
                         color: Qt.rgba(Theme.warning.r, Theme.warning.g, Theme.warning.b, 0.12)
@@ -1777,7 +1955,7 @@ PluginComponent {
                         id: emptyProviderErrors
                         width: parent.width
                         spacing: Theme.spacingXS
-                        visible: root.currentError() !== ""
+                        visible: !contentWrapper.preferencesExpanded && root.currentError() !== ""
 
                         Repeater {
                             model: ["opencode-go", "opencode-zen", "codex", "claude"]
@@ -1831,7 +2009,7 @@ PluginComponent {
                     Column {
                         width: parent.width
                         spacing: Theme.spacingXXS
-                        visible: root.activeTab === "opencode" && root.localStatsEnabled
+                        visible: !contentWrapper.preferencesExpanded && root.activeTab === "opencode" && root.localStatsEnabled
                             && (!!root.localStats || root.localStatsLoading || root.localStatsError !== "")
                         Component.onCompleted: {
                             if (root.activeTab === "opencode" && root.localStatsEnabled)
@@ -1894,7 +2072,7 @@ PluginComponent {
                         height: errCol.implicitHeight + Theme.spacingM * 2
                         radius: Theme.cornerRadius
                         color: Qt.rgba(Theme.error.r, Theme.error.g, Theme.error.b, 0.15)
-                        visible: root.currentError() !== "" && root.currentProviders().length === 0
+                        visible: !contentWrapper.preferencesExpanded && root.currentError() !== "" && root.currentProviders().length === 0
                             && !(root.activeTab === "opencode" && (root.providerError("opencode-go") !== "" || root.providerError("opencode-zen") !== ""))
                             && !(root.activeTab === "openai" && root.providerError("codex") !== "")
                             && !(root.activeTab === "claude" && root.providerError("claude") !== "")
@@ -1925,7 +2103,7 @@ PluginComponent {
 
                     // Loading
                     StyledText {
-                        visible: root.isLoading && root.currentProviders().length === 0
+                        visible: !contentWrapper.preferencesExpanded && root.isLoading && root.currentProviders().length === 0
                         text: "Fetching usage data..."
                         font.pixelSize: Theme.fontSizeMedium
                         color: Theme.surfaceVariantText
@@ -1942,6 +2120,7 @@ PluginComponent {
                             required property var modelData
                             required property int index
 
+                            visible: !contentWrapper.preferencesExpanded
                             width: mainCol.width
                             height: providerCol.implicitHeight + Theme.spacingM * 2
                             radius: Theme.cornerRadius
@@ -2248,7 +2427,7 @@ PluginComponent {
 
                     // No providers
                     StyledText {
-                        visible: root.currentProviders().length === 0 && root.currentError() === "" && !root.isLoading
+                        visible: !contentWrapper.preferencesExpanded && root.currentProviders().length === 0 && root.currentError() === "" && !root.isLoading
                         text: root.activeTab === "openai" ? "No Codex usage found. Run 'opentracker fetch codex' to configure." : root.activeTab === "claude" ? "No Claude usage found. Run 'opentracker fetch claude' to configure." : "No Opencode providers found. Run 'opentracker login opencode-go' to configure."
                         font.pixelSize: Theme.fontSizeMedium
                         color: Theme.surfaceVariantText

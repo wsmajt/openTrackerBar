@@ -61,6 +61,10 @@ The CLI handles Codex deduplication. If a fetch partially succeeds, successful a
 
 Account identifiers are retained in local DMS plugin settings and alert state to keep pins and alert history associated with the correct account. When an email is available, the widget shows only a masked hint in account labels; it does not store the full email in settings or alert state. Proxy credentials and configuration remain managed by opentracker.
 
+In the popout preferences, choose whether email labels show a short prefix or the full domain, and select the masking character and its length. Domain mode reveals the email provider, but not the account's local part.
+
+You can also hide all provider labels in the bar, leaving only icons and values. Cards and tooltips remain unchanged.
+
 ### Display and notifications
 
 Open the preferences section in the widget popout to choose **Used** or **Remaining**. The setting applies to quota percentages and progress bars, not to the Zen dollar balance. Warning colors always reflect usage: 5% remaining is still a high-usage warning.

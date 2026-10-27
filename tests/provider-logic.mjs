@@ -28,7 +28,7 @@ function makeRoot() {
         pendingFetches: 0, isLoading: false, opencodeError: "", openaiError: "", claudeError: "", hasError: false,
         activeTab: "opencode", refreshIntervalMs: 1000, clockNow: Date.now(), lastUpdated: "", barProviders: [],
         pluginId: "openTrackerBar", pluginData: {}, barSources: ["opencode-go", "opencode-zen", "codex"],
-        usageDisplayMode: "used", notificationsEnabled: false, zenBalanceThreshold: 1, alertQueue: [], alertProcessBusy: false,
+        usageDisplayMode: "used", notificationsEnabled: false, emailMaskMode: "prefix", emailMaskFill: "*", emailMaskCount: 3, zenBalanceThreshold: 1, alertQueue: [], alertProcessBusy: false,
         barSourceWindows: { "opencode-go": "rolling", codex: "primary", "opencode-zen": "none", claude: "fiveHour" }, localStatsEnabled: false, localStats: null, localStatsLoading: false, localStatsError: "", localStatsBuffer: "", localStatsStderr: "", localStatsStarted: false, localStatsAwaitingExit: false, localStatsUpdatedAt: 0, interactionActive: false,
         alertActiveRecord: null, alertOutput: "", alertTimeoutMs: 15000, pluginService: null
     };
@@ -45,7 +45,7 @@ function makeRoot() {
     for (const key of ["providerErrors", "providerTimes", "clockNow", "refreshIntervalMs", "fetchActive", "fetchTimeouts", "fetchAwaitingExit", "fetchStarted", "fetchStderr", "pendingFetches", "isLoading", "activeTab", "localStatsEnabled", "localStats", "localStatsLoading", "localStatsError", "localStatsBuffer", "localStatsStderr", "localStatsStarted", "localStatsAwaitingExit", "localStatsUpdatedAt", "interactionActive", "barSourceWindows", "claudeProviders", "claudeError"])
         Object.defineProperty(globals, key, { get: () => root[key], set: value => { root[key] = value; } });
     const context = vm.createContext(globals);
-    const names = ["parseProviderOutput", "inspectFamilyOutput", "normalizeFamilyOutput", "commitFamilyOutput", "markFamilyStale", "sourceIdOf", "sourceKind", "sourceName", "maskAccountEmail", "safeUsage", "sourceFetching", "sourceUpdatedLabel", "sourceIsStale", "sourceError", "sourceHint", "sourceRecoveryCommand", "availableSourceWindows", "selectedSourceWindowKey", "setSourceWindow", "sourceUsageWindow", "sourceWindowLabel", "validSourceId", "mergeProviders", "setProviderError", "finishFetch", "providerError", "providerHint", "providerRecoveryCommand", "classifyProviderFailure", "appendFetchStderr", "markFetchStarted", "providerUpdatedAt", "providerIsStale", "providerUpdatedLabel", "providerBalanceText", "barProviderText", "primaryUsage", "secondaryUsage", "tertiaryUsage", "claudeUsageWindow", "providerUsageWindows", "validNumber", "validUsageWindow", "hasZenBalance", "getUsageColor", "formatProviderName", "providerLogoPath", "providerTab", "currentProviders", "currentError", "normalizeBarSources", "legacyBarSources", "isBarSourceSelected", "toggleBarSource", "normalizeBarSourceWindows", "selectedWindowKey", "availableBarWindows", "barUsageWindow", "barWindowLabel", "setBarSourceWindow", "setLocalStatsEnabled", "selectBarProviders", "primaryLabel", "barTooltipText", "formatTimeUntil", "startFetch", "refreshProvider", "timeoutFetch", "savePluginSetting", "setUsageDisplayMode", "setNotificationsEnabled", "setZenBalanceThreshold", "displayPercent", "alertWindows", "alertState", "alertPrefs", "removeAlertReservation", "removeAlertReservationForProvider", "saveAlertState", "baselineAlertSource", "evaluateProviderAlerts", "startNextAlert", "finishAlert", "localDayBounds", "parseLocalStats", "ensureLocalStats", "invalidateLocalStatsForDay", "refreshLocalStats", "finishLocalStats", "localStatsMissingBinary", "localStatsNeedsUpgrade", "timeoutLocalStats"];
+    const names = ["parseProviderOutput", "inspectFamilyOutput", "normalizeFamilyOutput", "commitFamilyOutput", "markFamilyStale", "sourceIdOf", "sourceKind", "sourceName", "maskAccountEmail", "emailParts", "maskEmailParts", "safeUsage", "sourceFetching", "sourceUpdatedLabel", "sourceIsStale", "sourceError", "sourceHint", "sourceRecoveryCommand", "availableSourceWindows", "selectedSourceWindowKey", "setSourceWindow", "sourceUsageWindow", "sourceWindowLabel", "validSourceId", "mergeProviders", "setProviderError", "finishFetch", "providerError", "providerHint", "providerRecoveryCommand", "classifyProviderFailure", "appendFetchStderr", "markFetchStarted", "providerUpdatedAt", "providerIsStale", "providerUpdatedLabel", "providerBalanceText", "barProviderText", "primaryUsage", "secondaryUsage", "tertiaryUsage", "claudeUsageWindow", "providerUsageWindows", "validNumber", "validUsageWindow", "hasZenBalance", "getUsageColor", "formatProviderName", "providerLogoPath", "providerTab", "currentProviders", "currentError", "normalizeBarSources", "legacyBarSources", "isBarSourceSelected", "toggleBarSource", "normalizeBarSourceWindows", "selectedWindowKey", "availableBarWindows", "barUsageWindow", "barWindowLabel", "setBarSourceWindow", "setLocalStatsEnabled", "selectBarProviders", "primaryLabel", "barTooltipText", "formatTimeUntil", "startFetch", "refreshProvider", "timeoutFetch", "savePluginSetting", "setUsageDisplayMode", "setNotificationsEnabled", "setEmailMaskMode", "setEmailMaskFill", "setEmailMaskCount", "setShowBarLabels", "setZenBalanceThreshold", "displayPercent", "alertWindows", "alertState", "alertPrefs", "removeAlertReservation", "removeAlertReservationForProvider", "saveAlertState", "baselineAlertSource", "evaluateProviderAlerts", "startNextAlert", "finishAlert", "localDayBounds", "parseLocalStats", "ensureLocalStats", "invalidateLocalStatsForDay", "refreshLocalStats", "finishLocalStats", "localStatsMissingBinary", "localStatsNeedsUpgrade", "timeoutLocalStats"];
     for (const name of names) root[name] = vm.runInContext(`(${functionSource(name)})`, context);
     return root;
 }
@@ -806,7 +806,7 @@ test("family output keeps identities while masking account emails", () => {
         { provider: "cliproxyapi", usage: { accountProvider: "claude", authIndex: "auth-a", accountEmail: "user@example.invalid", usage: { fiveHour: { usedPercent: 20 } } } },
         { provider: "cliproxyapi", usage: { accountProvider: "claude", authIndex: "auth-b", accountEmail: "user@example.invalid", usage: { fiveHour: { usedPercent: 25 } } } }
     ])), item => item.sourceId), ["cliproxyapi:claude:auth-a", "cliproxyapi:claude:auth-b"]);
-    assert.doesNotMatch(JSON.stringify(root.openaiProviders), /alice|alex|example\.invalid/);
+    assert.doesNotMatch(JSON.stringify(root.openaiProviders), /alice|alex/);
 });
 
 test("masked account labels validate input and never retain raw addresses", () => {
@@ -829,13 +829,68 @@ test("masked account labels validate input and never retain raw addresses", () =
         "cliproxyapi:codex:bad-control": "",
         "cliproxyapi:codex:bad-space": "",
         "cliproxyapi:codex:nested": "ne***@ex***",
-        "cliproxyapi:codex:one": "a***@ex***",
+        "cliproxyapi:codex:one": "***@ex***",
         "cliproxyapi:codex:unicode": "éc***@éx***"
     });
     assert.equal(records.find(item => item.sourceId === "codex").usage.accountEmail, undefined);
-    assert.doesNotMatch(JSON.stringify(records), /nested@example|local@example|éxample\.invalid/);
+    assert.doesNotMatch(JSON.stringify(records), /nested@example|local@example|éclair/);
     assert.match(root.sourceName(records.find(item => item.sourceId === "codex")), /^Codex · lo\*\*\*@ex\*\*\*/);
     assert.equal(root.sourceName(records.find(item => item.sourceId === "cliproxyapi:codex:bad-at")), "Codex · Proxy 1");
+});
+
+test("email mask settings validate values and update existing provider names", () => {
+    const root = makeRoot();
+    const saved = [];
+    root.pluginService = { savePluginData: (_id, key, value) => { saved.push([key, value]); return true; } };
+    const records = root.normalizeFamilyOutput("codex", JSON.stringify([
+        { provider: "codex", usage: { accountEmail: "alice@gmail.com", primary: { usedPercent: 1 } } },
+        { provider: "cliproxyapi", usage: { accountProvider: "codex", accountId: "one", accountEmail: "alex@gmail.com", usage: { primary: { usedPercent: 2 } } } }
+    ]));
+    root.providers = records;
+    assert.equal(root.sourceName(records[0]), "Codex · al***@gm*** · 2");
+    assert.equal(root.setEmailMaskMode("domain"), true);
+    assert.equal(root.setEmailMaskMode("anything"), false);
+    root.emailMaskMode = "domain";
+    assert.equal(root.sourceName(records[0]), "Codex · ***@gmail.com · 2");
+    assert.equal(root.setEmailMaskFill("•"), true);
+    assert.equal(root.setEmailMaskFill("x"), false);
+    root.emailMaskFill = "•";
+    assert.equal(root.setEmailMaskCount(2), true);
+    for (const invalid of [0, 4, "2", 2.5, null]) assert.equal(root.setEmailMaskCount(invalid), false);
+    root.emailMaskCount = 2;
+    assert.equal(root.sourceName(records[0]), "Codex · ••@gmail.com · 2");
+    assert.deepEqual(saved, [["emailMaskMode", "domain"], ["emailMaskFill", "•"], ["emailMaskCount", 2]]);
+    assert.doesNotMatch(JSON.stringify(records), /alice|alex/);
+});
+
+test("email parts reject malformed and URL-like addresses without retaining full local parts", () => {
+    const root = makeRoot();
+    for (const email of ["", "a@@gmail.com", "a b@gmail.com", "a\u0001@gmail.com", "a@https://gmail.com", "a@gmail.com/path", "a@.gmail.com", "a@gmail..com"])
+        assert.equal(root.maskAccountEmail(email), "");
+    assert.equal(root.maskAccountEmail("a@gmail.com"), "***@gm***");
+    assert.equal(root.maskAccountEmail("alice@gmail.com", "domain", "•", 2), "••@gmail.com");
+    const parts = root.emailParts("alice@gmail.com");
+    assert.deepEqual(JSON.parse(JSON.stringify(parts)), { prefix: "al", domain: "gmail.com" });
+    assert.equal(JSON.stringify(parts).includes("alice"), false);
+});
+
+test("bar label visibility defaults on and persists explicit boolean choices", () => {
+    assert.match(source, /readonly property bool showBarLabels:\s*!root\.pluginData \|\| root\.pluginData\.showBarLabels !== false/);
+    const root = makeRoot();
+    const saved = [];
+    Object.defineProperty(root, "showBarLabels", { get: () => !root.pluginData || root.pluginData.showBarLabels !== false });
+    root.pluginService = { savePluginData: (_id, key, value) => { saved.push([key, value]); root.pluginData[key] = value; return true; } };
+    assert.equal(root.showBarLabels, true);
+    assert.equal(root.setShowBarLabels(false), true);
+    assert.equal(root.showBarLabels, false);
+    assert.equal(root.setShowBarLabels(true), true);
+    assert.equal(root.showBarLabels, true);
+    for (const invalid of ["false", 0, null]) assert.equal(root.setShowBarLabels(invalid), false);
+    assert.deepEqual(saved, [["showBarLabels", false], ["showBarLabels", true]]);
+    root.pluginData = {};
+    assert.equal(root.showBarLabels, true);
+    root.pluginData.showBarLabels = false;
+    assert.equal(root.showBarLabels, false);
 });
 
 test("family fetch exit one updates valid accounts and retains missing accounts as stale", () => {
