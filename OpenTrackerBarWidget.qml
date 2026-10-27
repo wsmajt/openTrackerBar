@@ -1285,7 +1285,7 @@ PluginComponent {
                         }
 
                         StyledText {
-                            text: barProviderDelegate.modelData.origin === "cliproxyapi" ? root.sourceName(barProviderDelegate.modelData) : barProviderDelegate.modelData.provider === "opencode-zen" ? "Zen" : barProviderDelegate.modelData.provider === "opencode-go" ? "Go" : root.formatProviderName(barProviderDelegate.modelData.provider)
+                            text: barProviderDelegate.modelData.provider === "codex" ? (barProviderDelegate.modelData.accountLabel ? root.sourceName(barProviderDelegate.modelData).replace(/^Codex · /, "") : "Codex") : barProviderDelegate.modelData.origin === "cliproxyapi" ? root.sourceName(barProviderDelegate.modelData) : barProviderDelegate.modelData.provider === "opencode-zen" ? "Zen" : barProviderDelegate.modelData.provider === "opencode-go" ? "Go" : root.formatProviderName(barProviderDelegate.modelData.provider)
                             font.pixelSize: Theme.fontSizeSmall
                             font.weight: Font.Medium
                             color: Theme.surfaceText
