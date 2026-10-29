@@ -77,6 +77,72 @@ PluginComponent {
         return val ? parseInt(val) : 120000;
     }
 
+    function isResetArray(value) {
+        return Array.isArray(value) || (value instanceof Array && Object.prototype.toString.call(value) === "[object V4Sequence]");
+    }
+
+    function resetCreditsOf(usage) {
+        var resetCredits = usage && typeof usage === "object" && !root.isResetArray(usage) ? usage.resetCredits : null;
+        if (!resetCredits || typeof resetCredits !== "object" || root.isResetArray(resetCredits))
+            return { available: null, applicable: null };
+        function validCount(value) {
+            return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : null;
+        }
+        var result = { available: validCount(resetCredits.available), applicable: validCount(resetCredits.applicable) };
+        var creditSequence = resetCredits.credits;
+        if (root.isResetArray(creditSequence)) {
+            var credits = [];
+            for (var i = 0; i < creditSequence.length; i++) {
+                var credit = creditSequence[i];
+                if (!credit || typeof credit !== "object" || root.isResetArray(credit)) continue;
+                if (credit.expiresAt !== undefined && credit.expiresAt !== null && typeof credit.expiresAt !== "string") continue;
+                var normalizedCredit = {};
+                if (credit.expiresAt !== undefined) normalizedCredit.expiresAt = credit.expiresAt;
+                credits.push(normalizedCredit);
+            }
+            result.credits = credits;
+        }
+        return result;
+    }
+
+    function resetExpiryInfo(credit) {
+        function info(kind, label, urgent, epoch) {
+            var result = { kind: kind, label: label, urgent: urgent };
+            if (epoch !== undefined) result.epoch = epoch;
+            return result;
+        }
+        if (!credit || typeof credit !== "object" || root.isResetArray(credit) || credit.expiresAt === undefined)
+            return info("unknown", "Expiry unknown", false);
+        if (credit.expiresAt === null)
+            return info("never", "Never expires", false);
+        if (typeof credit.expiresAt !== "string")
+            return info("unknown", "Expiry unknown", false);
+        var match = /^(\d\d\d\d)-(\d\d)-(\d\d)T(\d\d):(\d\d):(\d\d)(?:\.\d+)?(Z|[+-]\d\d:\d\d)$/.exec(credit.expiresAt);
+        if (!match) return info("unknown", "Expiry unknown", false);
+        var year = Number(match[1]), month = Number(match[2]), day = Number(match[3]);
+        var hour = Number(match[4]), minute = Number(match[5]), second = Number(match[6]);
+        var daysInMonth = [31, (year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0)) ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+        if (month < 1 || month > 12 || day < 1 || day > daysInMonth[month - 1] || hour > 23 || minute > 59 || second > 59)
+            return info("unknown", "Expiry unknown", false);
+        if (match[7] !== "Z" && (Number(match[7].slice(1, 3)) > 23 || Number(match[7].slice(4, 6)) > 59))
+            return info("unknown", "Expiry unknown", false);
+        var epoch = Date.parse(credit.expiresAt);
+        if (!Number.isFinite(epoch)) return info("unknown", "Expiry unknown", false);
+        var remaining = epoch - root.clockNow;
+        if (remaining <= 0) return info("expired", "Expired", true, epoch);
+        if (remaining <= 5 * 60 * 60 * 1000) {
+            if (remaining < 60 * 1000) return info("dated", "Less than 1m", true, epoch);
+            var totalMinutes = Math.floor(remaining / 60000);
+            var hours = Math.floor(totalMinutes / 60), minutes = totalMinutes % 60;
+            return info("dated", "Expires in " + (hours ? hours + "h " : "") + minutes + "m", true, epoch);
+        }
+        var futureMinutes = Math.floor(remaining / 60000);
+        var futureHours = Math.floor(futureMinutes / 60), futureRemainder = futureMinutes % 60;
+        if (futureHours >= 24)
+            return info("dated", "Expires in " + Math.floor(futureHours / 24) + "d " + (futureHours % 24) + "h", false, epoch);
+        return info("dated", "Expires in " + (futureHours ? futureHours + "h " : "") + futureRemainder + "m", false, epoch);
+    }
+
     // === Derived: highest-usage provider for the bar pill ===
     readonly property var highestProvider: {
         if (providers.length === 0)
@@ -202,7 +268,7 @@ PluginComponent {
     }
     function safeUsage(value) {
         var result = {};
-        Object.keys(value || {}).forEach(function (key) { if (key !== "accountEmail") result[key] = value[key]; });
+        Object.keys(value || {}).forEach(function (key) { if (key !== "accountEmail" && key !== "accountId" && key !== "authIndex" && key !== "resetTarget") result[key] = value[key]; });
         return result;
     }
     function sourceName(item) {
@@ -583,7 +649,9 @@ PluginComponent {
         data.forEach(function (item) {
             if (!item || typeof item !== "object" || Array.isArray(item)) { hasInvalid = true; return; }
             var kind, sourceId, origin, usage, accountLabel = "", sourceEmailParts = null;
-            if (item.provider === target) { kind = target; sourceId = target; origin = "local"; sourceEmailParts = root.emailParts(item.usage && item.usage.accountEmail); accountLabel = sourceEmailParts ? root.maskEmailParts(sourceEmailParts, "prefix", "*", 3) : ""; usage = root.safeUsage(item.usage); }
+            if (item.provider === target) {
+                kind = target; sourceId = target; origin = "local"; sourceEmailParts = root.emailParts(item.usage && item.usage.accountEmail); accountLabel = sourceEmailParts ? root.maskEmailParts(sourceEmailParts, "prefix", "*", 3) : ""; usage = root.safeUsage(item.usage);
+            }
             else if (item.provider === "cliproxyapi" && item.usage && item.usage.accountProvider === target) {
                 kind = target;
                 var identity = target === "codex" ? item.usage.accountId || item.usage.authIndex : item.usage.authIndex;
@@ -2235,6 +2303,7 @@ PluginComponent {
                                         color: Theme.surfaceVariantText
                                         anchors.verticalCenter: parent.verticalCenter
                                     }
+
                                     DCommonWidgets.DFilterChips {
                                         id: barWindowChips
                                         property var options: root.availableSourceWindows(providerCardDelegate.modelData)
@@ -2273,6 +2342,122 @@ PluginComponent {
                                     text: "Credits remaining: " + (providerCardDelegate.modelData.usage ? providerCardDelegate.modelData.usage.creditsRemaining : "")
                                     font.pixelSize: Theme.fontSizeSmall
                                     color: Theme.surfaceVariantText
+                                }
+
+                                Column {
+                                    id: bankedResetsSection
+                                    width: parent.width
+                                    spacing: Theme.spacingS
+                                    visible: providerCardDelegate.modelData.provider === "codex"
+
+                                    Column {
+                                        width: parent.width
+                                        spacing: Theme.spacingXXS
+                                        Row {
+                                            width: parent.width
+                                            spacing: Theme.spacingS
+                                            StyledText {
+                                                text: "Banked resets"
+                                                font.pixelSize: Theme.fontSizeSmall
+                                                font.weight: Font.Medium
+                                                color: Theme.surfaceText
+                                            }
+                                            StyledText {
+                                                readonly property var summary: root.resetCreditsOf(providerCardDelegate.modelData.usage)
+                                                text: summary && summary.available !== null && summary.available !== undefined
+                                                    ? String(summary.available) + " available" : "Availability unknown"
+                                                font.pixelSize: Theme.fontSizeSmall
+                                                font.weight: Font.Medium
+                                                color: Theme.surfaceVariantText
+                                                wrapMode: Text.WordWrap
+                                            }
+                                        }
+                                    }
+
+                                    StyledText {
+                                        width: parent.width
+                                        readonly property var summary: root.resetCreditsOf(providerCardDelegate.modelData.usage)
+                                        visible: !summary || summary.credits === undefined
+                                        text: "Expiry details unavailable"
+                                        font.pixelSize: Theme.fontSizeSmall
+                                        color: Theme.surfaceVariantText
+                                        wrapMode: Text.WordWrap
+                                    }
+
+                                    StyledText {
+                                        width: parent.width
+                                        readonly property var summary: root.resetCreditsOf(providerCardDelegate.modelData.usage)
+                                        visible: !!summary && root.isResetArray(summary.credits) && summary.credits.length === 0
+                                        text: "No reset dates were provided."
+                                        font.pixelSize: Theme.fontSizeSmall
+                                        color: Theme.surfaceVariantText
+                                        wrapMode: Text.WordWrap
+                                    }
+
+                                    DCommonWidgets.DFlickable {
+                                        id: resetExpiryFlickable
+                                        readonly property var credits: {
+                                            var summary = root.resetCreditsOf(providerCardDelegate.modelData.usage);
+                                            return summary && root.isResetArray(summary.credits) ? summary.credits : [];
+                                        }
+                                        width: parent.width
+                                        visible: credits.length > 0
+                                        height: Math.min(resetExpiryRows.implicitHeight, Theme.buttonHeightS * 4)
+                                        contentWidth: width
+                                        contentHeight: resetExpiryRows.implicitHeight
+                                        clip: true
+                                        showScrollBar: contentHeight > height
+                                        fadeEdges: contentHeight > height
+
+                                        Column {
+                                            id: resetExpiryRows
+                                            width: resetExpiryFlickable.width
+                                             spacing: Theme.spacingXS
+
+                                            Repeater {
+                                                model: resetExpiryFlickable.credits
+
+                                                 Row {
+                                                     id: expiryDelegate
+                                                     required property var modelData
+                                                     required property int index
+                                                     width: resetExpiryRows.width
+                                                     spacing: Theme.spacingS
+                                                     readonly property var expiry: root.resetExpiryInfo(modelData)
+
+                                                    StyledText {
+                                                        id: resetIndexLabel
+                                                         text: "Reset " + (expiryDelegate.index + 1)
+                                                         font.pixelSize: Theme.fontSizeSmall
+                                                         font.weight: Font.Medium
+                                                         color: Theme.surfaceVariantText
+                                                     }
+                                                     StyledText {
+                                                         width: Math.max(0, expiryDelegate.width - resetIndexLabel.implicitWidth - expiryDelegate.spacing)
+                                                        text: expiryDelegate.expiry && expiryDelegate.expiry.kind === "never" ? "No expiry"
+                                                            : expiryDelegate.expiry && expiryDelegate.expiry.label
+                                                                ? expiryDelegate.expiry.label + (expiryDelegate.expiry.kind === "dated" && Number.isFinite(expiryDelegate.expiry.epoch)
+                                                                    ? " · " + Qt.formatDateTime(new Date(expiryDelegate.expiry.epoch), "yyyy-MM-dd hh:mm") : "")
+                                                                : "Expiry unknown"
+                                                         font.pixelSize: Theme.fontSizeSmall
+                                                         color: expiryDelegate.expiry && expiryDelegate.expiry.urgent ? Theme.error : Theme.surfaceVariantText
+                                                         wrapMode: Text.WordWrap
+                                                     }
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    StyledText {
+                                        readonly property var summary: root.resetCreditsOf(providerCardDelegate.modelData.usage)
+                                        visible: !!summary && summary.available !== null && summary.available !== undefined
+                                            && root.isResetArray(summary.credits) && summary.available > summary.credits.length
+                                        text: "Some reset dates were not provided."
+                                        font.pixelSize: Theme.fontSizeSmall
+                                        color: Theme.surfaceVariantText
+                                        wrapMode: Text.WordWrap
+                                    }
+
                                 }
 
                                 // Error state for this provider

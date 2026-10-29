@@ -61,6 +61,10 @@ The CLI handles Codex deduplication. If a fetch partially succeeds, successful a
 
 Account identifiers are retained in local DMS plugin settings and alert state to keep pins and alert history associated with the correct account. When an email is available, the widget shows only a masked hint in account labels; it does not store the full email in settings or alert state. Proxy credentials and configuration remain managed by opentracker.
 
+Codex cards show available banked resets when opentracker reports them; an unknown count is not treated as zero. This information is read-only: the widget does not provide or execute a reset action.
+
+Reported expiry dates are listed separately for each reset and highlighted red when five hours or less remain. A missing expiry is unknown; an explicit `null` means no expiry. Some providers may not return a complete list.
+
 In the popout preferences, choose whether email labels show a short prefix or the full domain, and select the masking character and its length. Domain mode reveals the email provider, but not the account's local part.
 
 You can also hide all provider labels in the bar, leaving only icons and values. Cards and tooltips remain unchanged.
@@ -87,9 +91,10 @@ Statistics are requested only when the summary is enabled and the Opencode tab i
 
 ```bash
 node --test tests/provider-logic.mjs
+tests/reset-credits-qml.sh
 ```
 
-These offline tests exercise the widget's JavaScript helpers with quota and balance fixtures. They do not run opentracker, authenticate, or validate the rendered QML interface.
+These offline tests exercise the widget's JavaScript helpers with synthetic fixtures. The QML test requires Qt 6's `qmltestrunner` and checks reset-credit sequences in a real Qt delegate. Neither test runs opentracker or authenticates; they do not validate the rendered DMS interface.
 
 ## Credits
 [zakstam](https://github.com/zakstam/dms-codexbar) - dms-codexbar

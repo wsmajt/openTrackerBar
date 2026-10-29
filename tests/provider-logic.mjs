@@ -45,7 +45,7 @@ function makeRoot() {
     for (const key of ["providerErrors", "providerTimes", "clockNow", "refreshIntervalMs", "fetchActive", "fetchTimeouts", "fetchAwaitingExit", "fetchStarted", "fetchStderr", "pendingFetches", "isLoading", "activeTab", "localStatsEnabled", "localStats", "localStatsLoading", "localStatsError", "localStatsBuffer", "localStatsStderr", "localStatsStarted", "localStatsAwaitingExit", "localStatsUpdatedAt", "interactionActive", "barSourceWindows", "claudeProviders", "claudeError"])
         Object.defineProperty(globals, key, { get: () => root[key], set: value => { root[key] = value; } });
     const context = vm.createContext(globals);
-    const names = ["parseProviderOutput", "inspectFamilyOutput", "normalizeFamilyOutput", "commitFamilyOutput", "markFamilyStale", "sourceIdOf", "sourceKind", "sourceName", "maskAccountEmail", "emailParts", "maskEmailParts", "safeUsage", "sourceFetching", "sourceUpdatedLabel", "sourceIsStale", "sourceError", "sourceHint", "sourceRecoveryCommand", "availableSourceWindows", "selectedSourceWindowKey", "setSourceWindow", "sourceUsageWindow", "sourceWindowLabel", "validSourceId", "mergeProviders", "setProviderError", "finishFetch", "providerError", "providerHint", "providerRecoveryCommand", "classifyProviderFailure", "appendFetchStderr", "markFetchStarted", "providerUpdatedAt", "providerIsStale", "providerUpdatedLabel", "providerBalanceText", "barProviderText", "primaryUsage", "secondaryUsage", "tertiaryUsage", "claudeUsageWindow", "providerUsageWindows", "validNumber", "validUsageWindow", "hasZenBalance", "getUsageColor", "formatProviderName", "providerLogoPath", "providerTab", "currentProviders", "currentError", "normalizeBarSources", "legacyBarSources", "isBarSourceSelected", "toggleBarSource", "normalizeBarSourceWindows", "selectedWindowKey", "availableBarWindows", "barUsageWindow", "barWindowLabel", "setBarSourceWindow", "setLocalStatsEnabled", "selectBarProviders", "primaryLabel", "barTooltipText", "formatTimeUntil", "startFetch", "refreshProvider", "timeoutFetch", "savePluginSetting", "setUsageDisplayMode", "setNotificationsEnabled", "setEmailMaskMode", "setEmailMaskFill", "setEmailMaskCount", "setShowBarLabels", "setZenBalanceThreshold", "displayPercent", "alertWindows", "alertState", "alertPrefs", "removeAlertReservation", "removeAlertReservationForProvider", "saveAlertState", "baselineAlertSource", "evaluateProviderAlerts", "startNextAlert", "finishAlert", "localDayBounds", "parseLocalStats", "ensureLocalStats", "invalidateLocalStatsForDay", "refreshLocalStats", "finishLocalStats", "localStatsMissingBinary", "localStatsNeedsUpgrade", "timeoutLocalStats"];
+    const names = ["isResetArray", "resetCreditsOf", "resetExpiryInfo", "parseProviderOutput", "inspectFamilyOutput", "normalizeFamilyOutput", "commitFamilyOutput", "markFamilyStale", "sourceIdOf", "sourceKind", "sourceName", "maskAccountEmail", "emailParts", "maskEmailParts", "safeUsage", "sourceFetching", "sourceUpdatedLabel", "sourceIsStale", "sourceError", "sourceHint", "sourceRecoveryCommand", "availableSourceWindows", "selectedSourceWindowKey", "setSourceWindow", "sourceUsageWindow", "sourceWindowLabel", "validSourceId", "mergeProviders", "setProviderError", "finishFetch", "providerError", "providerHint", "providerRecoveryCommand", "classifyProviderFailure", "appendFetchStderr", "markFetchStarted", "providerUpdatedAt", "providerIsStale", "providerUpdatedLabel", "providerBalanceText", "barProviderText", "primaryUsage", "secondaryUsage", "tertiaryUsage", "claudeUsageWindow", "providerUsageWindows", "validNumber", "validUsageWindow", "hasZenBalance", "getUsageColor", "formatProviderName", "providerLogoPath", "providerTab", "currentProviders", "currentError", "normalizeBarSources", "legacyBarSources", "isBarSourceSelected", "toggleBarSource", "normalizeBarSourceWindows", "selectedWindowKey", "availableBarWindows", "barUsageWindow", "barWindowLabel", "setBarSourceWindow", "setLocalStatsEnabled", "selectBarProviders", "primaryLabel", "barTooltipText", "formatTimeUntil", "startFetch", "refreshProvider", "timeoutFetch", "savePluginSetting", "setUsageDisplayMode", "setNotificationsEnabled", "setEmailMaskMode", "setEmailMaskFill", "setEmailMaskCount", "setShowBarLabels", "setZenBalanceThreshold", "displayPercent", "alertWindows", "alertState", "alertPrefs", "removeAlertReservation", "removeAlertReservationForProvider", "saveAlertState", "baselineAlertSource", "evaluateProviderAlerts", "startNextAlert", "finishAlert", "localDayBounds", "parseLocalStats", "ensureLocalStats", "invalidateLocalStatsForDay", "refreshLocalStats", "finishLocalStats", "localStatsMissingBinary", "localStatsNeedsUpgrade", "timeoutLocalStats"];
     for (const name of names) root[name] = vm.runInContext(`(${functionSource(name)})`, context);
     return root;
 }
@@ -836,6 +836,83 @@ test("masked account labels validate input and never retain raw addresses", () =
     assert.doesNotMatch(JSON.stringify(records), /nested@example|local@example|éclair/);
     assert.match(root.sourceName(records.find(item => item.sourceId === "codex")), /^Codex · lo\*\*\*@ex\*\*\*/);
     assert.equal(root.sourceName(records.find(item => item.sourceId === "cliproxyapi:codex:bad-at")), "Codex · Proxy 1");
+});
+
+test("reset credit display keeps unknown values distinct from zero", () => {
+    const root = makeRoot();
+    assert.deepEqual(JSON.parse(JSON.stringify(root.resetCreditsOf({}))), { available: null, applicable: null });
+    assert.deepEqual(JSON.parse(JSON.stringify(root.resetCreditsOf({ resetCredits: { available: 1 } }))), { available: 1, applicable: null });
+    assert.deepEqual(JSON.parse(JSON.stringify(root.resetCreditsOf({ resetCredits: { available: 1, credits: [] } }))), { available: 1, applicable: null, credits: [] });
+    assert.deepEqual(JSON.parse(JSON.stringify(root.resetCreditsOf({ resetCredits: { available: 0, applicable: 0, credits: [{}, { expiresAt: null }, { expiresAt: "2026-12-01T00:00:00Z" }] } }))), {
+        available: 0, applicable: 0, credits: [{}, { expiresAt: null }, { expiresAt: "2026-12-01T00:00:00Z" }]
+    });
+    for (const invalid of [-1, 1.5, "2", true, Number.MAX_SAFE_INTEGER + 1])
+        assert.equal(root.resetCreditsOf({ resetCredits: { available: invalid } }).available, null);
+    assert.equal(root.resetCreditsOf({ resetCredits: { available: 4, applicable: -1 } }).applicable, null);
+});
+
+test("reset credit lists reject array-like objects and accept native arrays", () => {
+    const root = makeRoot();
+    const spoof = { 0: { expiresAt: null }, length: 1, [Symbol.toStringTag]: "V4Sequence" };
+    for (const credits of [null, "x", { 0: {}, length: 1 }, spoof]) {
+        const summary = root.resetCreditsOf({ resetCredits: { available: 1, credits } });
+        assert.equal(summary.credits, undefined);
+    }
+    assert.deepEqual(JSON.parse(JSON.stringify(root.resetCreditsOf({ resetCredits: { available: 1, credits: [{ expiresAt: null }] } }))).credits, [{ expiresAt: null }]);
+    assert.deepEqual(JSON.parse(JSON.stringify(root.resetCreditsOf({ resetCredits: { available: 1, credits: [{ expiresAt: 4 }, null, {}, { expiresAt: null }] } }))).credits, [{}, { expiresAt: null }]);
+});
+
+test("reset expiry distinguishes unknown, never, dated, and expired credits", () => {
+    const root = makeRoot();
+    root.clockNow = Date.UTC(2026, 0, 1, 0, 0, 0);
+    for (const credit of [{}, { expiresAt: undefined }, { expiresAt: "2026-01-01T01:00:00" }, { expiresAt: "2026-02-30T00:00:00Z" }, { expiresAt: "2026-01-01T00:00:00+25:00" }]) {
+        assert.deepEqual(JSON.parse(JSON.stringify(root.resetExpiryInfo(credit))), { kind: "unknown", label: "Expiry unknown", urgent: false });
+    }
+    assert.deepEqual(JSON.parse(JSON.stringify(root.resetExpiryInfo({ expiresAt: null }))), { kind: "never", label: "Never expires", urgent: false });
+    const past = root.resetExpiryInfo({ expiresAt: "2025-12-31T23:59:59Z" });
+    assert.equal(past.kind, "expired");
+    assert.equal(past.label, "Expired");
+    assert.equal(past.urgent, true);
+    assert.equal(past.epoch, Date.UTC(2025, 11, 31, 23, 59, 59));
+});
+
+test("reset expiry uses UTC instants, exact urgency boundaries, and does not mutate input", () => {
+    const root = makeRoot();
+    const now = Date.UTC(2026, 0, 1, 0, 0, 0);
+    root.clockNow = now;
+    const credit = { expiresAt: "2026-01-01T02:15:00Z" };
+    assert.deepEqual(JSON.parse(JSON.stringify(root.resetExpiryInfo(credit))), { kind: "dated", label: "Expires in 2h 15m", urgent: true, epoch: now + 2 * 60 * 60 * 1000 + 15 * 60 * 1000 });
+    assert.equal(root.resetExpiryInfo({ expiresAt: new Date(now + 59 * 1000).toISOString() }).label, "Less than 1m");
+    assert.equal(root.resetExpiryInfo({ expiresAt: new Date(now + 5 * 60 * 60 * 1000).toISOString() }).urgent, true);
+    assert.equal(root.resetExpiryInfo({ expiresAt: new Date(now + 5 * 60 * 60 * 1000 + 1).toISOString() }).urgent, false);
+    assert.equal(root.resetExpiryInfo({ expiresAt: new Date(now + 195 * 60 * 60 * 1000).toISOString() }).label, "Expires in 8d 3h");
+    const offset = root.resetExpiryInfo({ expiresAt: "2026-03-08T02:30:00-05:00" });
+    assert.equal(offset.kind, "dated");
+    assert.equal(offset.epoch, Date.UTC(2026, 2, 8, 7, 30));
+    const yearEnd = root.resetExpiryInfo({ expiresAt: "2027-01-01T00:00:00+02:00" });
+    assert.equal(yearEnd.epoch, Date.UTC(2026, 11, 31, 22, 0));
+    assert.deepEqual(credit, { expiresAt: "2026-01-01T02:15:00Z" });
+    assert.match(source, /property real clockNow: Date\.now\(\)/);
+});
+
+test("reset target metadata is discarded and no reset launch action remains", () => {
+    const root = makeRoot();
+    const resetTarget = { authIndex: "auth-secret", accountId: "acct-secret" };
+    const usage = { primary: { usedPercent: 10 }, resetCredits: { available: 2 }, resetTarget };
+    const sanitized = root.safeUsage(usage);
+    assert.deepEqual(JSON.parse(JSON.stringify(sanitized)), { primary: { usedPercent: 10 }, resetCredits: { available: 2 } });
+    const records = root.normalizeFamilyOutput("codex", JSON.stringify([
+        { provider: "codex", usage: { ...usage, accountId: "acct-secret", authIndex: "auth-secret" } },
+        { provider: "cliproxyapi", usage: { accountProvider: "codex", accountId: "acct-proxy", authIndex: "auth-proxy", resetTarget, usage: { primary: { usedPercent: 20 }, resetCredits: { available: 1 } } } }
+    ]));
+    assert.equal(records.length, 2);
+    assert.equal("resetAuthIndex" in records[0], false);
+    assert.equal("resetAccountId" in records[0], false);
+    assert.equal("resetTarget" in records[0].usage, false);
+    assert.equal("resetTarget" in records[1].usage, false);
+    assert.doesNotMatch(JSON.stringify(records) + JSON.stringify(root.pluginData), /auth-secret|acct-secret|auth-proxy/);
+    assert.doesNotMatch(source, /opentracker\s+reset\s+codex/);
+    assert.doesNotMatch(source, /openResetTerminal/);
 });
 
 test("email mask settings validate values and update existing provider names", () => {
